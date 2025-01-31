@@ -18,54 +18,179 @@ from scipy.signal import medfilt2d
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
 
-class DEMGrid:
-    """A class to store digital elevation model.
-
-    Args:
-        data (numpy.ma.MaskedArray): data as masked numpy array
-        cmap (str, optional): Colormap. Default is `"terrain"`
-        stretch (bool, optional): Stretch colormap. Default is `False`
-        title (str, optional): title of dataset. Default is `"DEM"`
-        figsize (tuple, optional): matplotlib figure size.
-        driver (str, optional): Default is `"GTiff"`
-        dtype (str, optional): Default is `"float64"`
-        nodata (float, optional): Default is `-9999.0`
-        compress (str, optional): Default is `"lzw"`
-        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
-        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
-
-    Attributes:
-        min (float): minimum of data
-        max (float): maximum of data
-
-    Example:
-        >>> d = DEMGrid.from_exmaples('smalldem')
-        >>> d.show()
-
-    """
+class Grid:
 
     def __init__(self, data, **kwargs):
-        self.cmap = kwargs.pop("cmap", "terrain")
-        self.stretch = kwargs.pop("stretch", False)
-        self.title = kwargs.pop("title", "DEM")
-        self.figsize = kwargs.pop("figsize", plt.rcParams["figure.figsize"])
+        self.cmap = kwargs.get("cmap", "viridis")
+        self.stretch = kwargs.get("stretch", True)
+        self.title = kwargs.get("title", "Grid")
+        self.figsize = kwargs.get("figsize", plt.rcParams["figure.figsize"])
         self.meta = {
-            "driver": "GTiff",
-            "dtype": "float64",
-            "nodata": -9999.0,
+            "driver": "",
+            "dtype": "",
+            "nodata": 0,
             "width": 0,
             "height": 0,
             "count": 1,
-            "compress": "lzw",
+            "compress": "",
             "crs": riocrs.CRS.from_epsg(3857),
             "transform": Affine(1.0, 0.0, 0, 0.0, -1.0, 0),
         }
-        self.meta.update(kwargs)
+        self.meta.update((k, v) for k, v in kwargs.items() if k in self.meta)
         assert data.shape == (
             self.meta["height"],
             self.meta["width"],
         ), "Wrong metadata !"
         self.data = data
+
+    def __add__(self, other):
+        if isinstance(other, DEMGrid):
+            data = self.data + other.data
+        else:
+            data = self.data + other
+        return self.clone(data)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __iadd__(self, other):
+        if isinstance(other, DEMGrid):
+            self.data += other.data
+        else:
+            self.data += other
+        return self
+
+    def __sub__(self, other):
+        if isinstance(other, DEMGrid):
+            data = self.data - other.data
+        else:
+            data = self.data - other
+        return self.clone(data)
+
+    def __rsub__(self, other):
+        if isinstance(other, DEMGrid):
+            data = other.data - self.data
+        else:
+            data = other - self.data
+        return self.clone(data)
+
+    def __isub__(self, other):
+        if isinstance(other, DEMGrid):
+            self.data -= other.data
+        else:
+            self.data -= other
+        return self
+
+    def __mul__(self, other):
+        if isinstance(other, DEMGrid):
+            data = self.data * other.data
+        else:
+            data = self.data * other
+        return self.clone(data)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __imul__(self, other):
+        if isinstance(other, DEMGrid):
+            self.data *= other.data
+        else:
+            self.data *= other
+        return self
+
+    def __truediv__(self, other):
+        if isinstance(other, DEMGrid):
+            data = self.data / other.data
+        else:
+            data = self.data / other
+        return self.clone(data)
+
+    def __rtruediv__(self, other):
+        if isinstance(other, DEMGrid):
+            data = other.data / self.data
+        else:
+            data = other / self.data
+        return self.clone(data)
+
+    def __itruediv__(self, other):
+        if isinstance(other, DEMGrid):
+            self.data /= other.data
+        else:
+            self.data /= other
+        return self
+
+    def clone(self, data, **kwargs):
+        """Clone grid with new data
+
+        Args:
+            data (numpy.ma.MaskedArray): data as masked numpy array
+            cmap (str, optional): Colormap. Default keep original.
+            stretch (bool, optional): Stretch colormap. Default keep original.
+            title (str, optional): title of dataset. Default keep original.
+            figsize (tuple, optional): matplotlib figure size. Default keep original.
+
+        """
+        return type(self)(
+            data,
+            cmap=kwargs.get("cmap", self.cmap),
+            stretch=kwargs.get("stretch", self.stretch),
+            title=kwargs.get("title", self.title),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
+        )
+
+    @contextmanager
+    def asdataset(self):
+        with MemoryFile() as memfile:
+            # if np.any(self.data.mask):
+            with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
+                with memfile.open(**self.meta) as dst:
+                    dst.write(self.data, 1)
+            with memfile.open() as dataset:  # Reopen as DatasetReader
+                yield dataset  # Note yield not return
+
+    @property
+    def _values(self):
+        return np.asarray(self.data[~self.data.mask])
+
+    def sample(self, pts):
+        """Returns array of values for sample points
+
+        Args:
+            pts(iterable): Pairs of x, y coordinates in the dataset’s reference system.
+
+        """
+        with self.asdataset() as src:
+            res = np.array([*riosample.sample_gen(src, pts)]).flatten()
+        return res
+
+    def sample_line(self, p1, p2, n=10):
+        """Returns array of values along line defined by endpoints p1 and p2
+
+        Args:
+            p1(tuple): Pair of x, y coordinates in the dataset’s reference system
+            p2(tuple): Pair of x, y coordinates in the dataset’s reference system
+            n(int, optional): NUmber of points sampled along line. Default `10`
+
+        """
+        pts = (
+            (p1[0] + k * (p2[0] - p1[0]), p1[1] + k * (p2[1] - p1[1]))
+            for k in np.linspace(0, 1, n)
+        )
+        return self.sample(pts)
+
+
+class FloatGrid(Grid):
+
+    def __init__(self, data, **kwargs):
+        super().__init__(data, **kwargs)
+
+    def __repr__(self):
+        return (
+            f"{self.title} [{self.meta['height']},{self.meta['width']}] "
+            + f"range: ({self.min:g}-{self.max:g}) masked:{self.data.mask.sum()} "
+            + f"EPSG:{self.meta['crs'].to_epsg()}"
+        )
 
     @classmethod
     def from_file(cls, filename, **kwargs):
@@ -73,32 +198,6 @@ class DEMGrid:
             data = src.read(1, masked=True)
             meta = src.meta
         return cls(data, **kwargs, **meta)
-
-    @classmethod
-    def from_examples(cls, example=None):
-        """Get example dem data
-
-        Args:
-            example (str, optional): Name of example. When None, available examples
-                are printed. Default is `None`
-
-        Returns:
-            DEMGrid: digital elevation model
-
-        """
-        datapath = importlib.resources.files("demtools") / "data"
-        if example is None:
-            print(f"Available examples: {[f.stem for f in datapath.glob('*.tif')]}")  # type: ignore
-        else:
-            fname = (datapath / example).with_suffix(".tif")
-            assert fname.exists(), "Example {example} do not exists."
-            return cls.from_file(fname)
-
-    def __repr__(self):
-        return (
-            f"{self.title} [{self.meta['height']},{self.meta['width']}] "
-            + f"EPSG:{self.meta['crs'].to_epsg()} masked:{self.data.mask.sum()}"
-        )
 
     def write_tif(self, filename):
         """Write dataset to file
@@ -115,30 +214,6 @@ class DEMGrid:
         else:
             with rio.open(filename, "w", **self.meta) as dst:
                 dst.write_band(1, self.data.filled())
-
-    def clone(self, data, **kwargs):
-        """Clone dataset with modified data
-
-        Args:
-            data (numpy.ma.MaskedArray): data as masked numpy array
-            cmap (str, optional): Colormap. Default keep original.
-            stretch (bool, optional): Stretch colormap. Default keep original.
-            title (str, optional): title of dataset. Default keep original.
-            figsize (tuple, optional): matplotlib figure size. Default keep original.
-
-        """
-        return DEMGrid(
-            data,
-            cmap=kwargs.get("cmap", self.cmap),
-            stretch=kwargs.get("stretch", self.stretch),
-            title=kwargs.get("title", self.title),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
-        )
-
-    @property
-    def _values(self):
-        return np.asarray(self.data[~self.data.mask])
 
     @cached_property
     def _dx(self):
@@ -209,16 +284,6 @@ class DEMGrid:
             title=kwargs.get("title", f"INV({self.title})"),
         )
 
-    @contextmanager
-    def asdataset(self):
-        with MemoryFile() as memfile:
-            # if np.any(self.data.mask):
-            with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
-                with memfile.open(**self.meta) as dst:
-                    dst.write(self.data, 1)
-            with memfile.open() as dataset:  # Reopen as DatasetReader
-                yield dataset  # Note yield not return
-
     def resample(self, scale=1, **kwargs):
         """Returns resampled dataset
 
@@ -241,32 +306,6 @@ class DEMGrid:
             )
         return DEMGrid(data, **kwargs, **meta)
 
-    def sample(self, pts):
-        """Returns array of values for sample points
-
-        Args:
-            pts(iterable): Pairs of x, y coordinates in the dataset’s reference system.
-
-        """
-        with self.asdataset() as src:
-            res = np.array([*riosample.sample_gen(src, pts)]).flatten()
-        return res
-
-    def sample_line(self, p1, p2, n=10):
-        """Returns array of values along line defined by endpoints p1 and p2
-
-        Args:
-            p1(tuple): Pair of x, y coordinates in the dataset’s reference system
-            p2(tuple): Pair of x, y coordinates in the dataset’s reference system
-            n(int, optional): NUmber of points sampled along line. Default `10`
-
-        """
-        pts = (
-            (p1[0] + k * (p2[0] - p1[0]), p1[1] + k * (p2[1] - p1[1]))
-            for k in np.linspace(0, 1, n)
-        )
-        return self.sample(pts)
-
     def dx(self, **kwargs):
         """Returns horizontal derivative dx
 
@@ -276,11 +315,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"dx(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             self._dx,
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"dx({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def dy(self, **kwargs):
@@ -292,11 +333,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"dy(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             self._dy,
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"dy({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def dz(self, **kwargs):
@@ -308,11 +351,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"dz(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             np.ma.masked_array(self._dz, mask=self._dx.mask | self._dy.mask),
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"dz({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def upcont(self, h, **kwargs):
@@ -327,11 +372,13 @@ class DEMGrid:
         up = upcontinue(
             self.data, self.meta["transform"].a, self.meta["transform"].e, h
         )
-        return self.clone(
+        return FloatGrid(
             np.ma.masked_array(up, mask=self._dx.mask | self._dy.mask),
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"up({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def thd(self, **kwargs):
@@ -343,11 +390,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"THD(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             self._thd,
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"THD({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def tga(self, **kwargs):
@@ -359,11 +408,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"TGA(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             self._tga,
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"TGA({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def theta(self, **kwargs):
@@ -375,11 +426,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"Theta(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             self._thd / self._tga,
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"Theta({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def nthd(self, **kwargs):
@@ -391,11 +444,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"NTHD(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             np.real(np.arctan2(self._thd, np.absolute(self._dz))),
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"NTHD({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def tilt(self, **kwargs):
@@ -407,11 +462,13 @@ class DEMGrid:
             title (str, optional): title of dataset. Default '"Tilt(...)"'.
 
         """
-        return self.clone(
+        return FloatGrid(
             np.arctan2(self._dz, self._thd),
             cmap=kwargs.get("cmap", "bone_r"),
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"Tilt({self.title})"),
+            figsize=kwargs.get("figsize", self.figsize),
+            **self.meta,
         )
 
     def gaussian_filter(self, **kwargs):
@@ -463,6 +520,126 @@ class DEMGrid:
             stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", f"M({self.title}, {kernel_size})"),
         )
+
+    def overlay(self, over, invert=False):
+        """Create RGBimage of overlied datasets in HSV space
+
+        Args:
+            invert(bool): Default False
+
+        """
+        img_array = plt.get_cmap(self.cmap)(self.normalized().data)
+        hsv = clr.rgb_to_hsv(img_array[:, :, :3])
+        if invert:
+            hsv[:, :, 2] = 1 - over.normalized().data
+        else:
+            hsv[:, :, 2] = over.normalized().data
+        rgb = clr.hsv_to_rgb(hsv)
+        return RGBimage(
+            rioplot.reshape_as_raster(rgb),
+            figsize=self.figsize,
+            title=f"{over.title}/{self.title}",
+            **self.meta,
+        )
+
+    def show(self, **kwargs):
+        """Show dataset
+
+        Args:
+            contour(bool): Show data as contours. Default `False`
+            contour_label_kws(dict): Default None
+            cmap (str, optional): Colormap. Default is `"terrain"`
+            stretch (bool, optional): Stretch colormap. Default is `False`
+            title (str, optional): title of dataset. Default is `"DEM"`
+            figsize (tuple, optional): matplotlib figure size.
+
+        """
+        contour = kwargs.pop("contour", False)
+        contour_label_kws = kwargs.pop("contour_label_kws", None)
+        ax = kwargs.pop("ax", None)
+        title = kwargs.pop("title", self.title)
+        transform = kwargs.pop("transform", self.meta["transform"])
+        stretch = kwargs.pop("stretch", self.stretch)
+        figsize = kwargs.pop("figsize", self.figsize)
+        colorbar = kwargs.pop("colorbar", True)
+        if "cmap" not in kwargs:
+            kwargs["cmap"] = self.cmap
+        if stretch:
+            kwargs["vmin"], kwargs["vmax"] = np.percentile(self._values, [2, 98])
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+        else:  # externally created fig, so no colorbar
+            colorbar = False
+        rioax = rioplot.show(
+            self.data,
+            contour=contour,
+            contour_label_kws=contour_label_kws,
+            ax=ax,
+            title=title,
+            transform=transform,
+            **kwargs,
+        )
+        if colorbar:
+            divider = make_axes_locatable(ax)
+            cax = divider.append_axes("right", size="5%", pad=0.05)
+            if contour:
+                fig.colorbar(rioax.collections[0], cax=cax)  # type: ignore
+            else:
+                fig.colorbar(rioax.images[0], cax=cax)  # type: ignore
+        plt.show()
+
+
+class DEMGrid(FloatGrid):
+    """A class to store digital elevation model.
+
+    Args:
+        data (numpy.ma.MaskedArray): data as masked numpy array
+        cmap (str, optional): Colormap. Default is `"terrain"`
+        stretch (bool, optional): Stretch colormap to 2-98 percentil. Default is `False`
+        title (str, optional): title of dataset. Default is `"DEM"`
+        figsize (tuple, optional): matplotlib figure size.
+        driver (str, optional): Default is `"GTiff"`
+        dtype (str, optional): Default is `"float64"`
+        nodata (float, optional): Default is `-9999.0`
+        compress (str, optional): Default is `"lzw"`
+        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
+        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+
+    Attributes:
+        min (float): minimum of data
+        max (float): maximum of data
+
+    Example:
+        >>> d = DEMGrid.from_exmaples('smalldem')
+        >>> d.show()
+
+    """
+
+    def __init__(self, data, **kwargs):
+        super().__init__(data, **kwargs)
+        self.stretch = kwargs.get("stretch", False)
+        self.cmap = kwargs.get("cmap", "terrain")
+        self.title = kwargs.get("title", "DEM")
+
+    @classmethod
+    def from_examples(cls, example=None):
+        """Get example dem data
+
+        Args:
+            example (str, optional): Name of example. When None, available examples
+                are printed. Default is `None`
+
+        Returns:
+            DEMGrid: digital elevation model
+
+        """
+        datapath = importlib.resources.files("demtools") / "data"
+        if example is None:
+            print(f"Available examples: {[f.stem for f in datapath.glob('*.tif')]}")  # type: ignore
+        else:
+            fname = (datapath / example).with_suffix(".tif")
+            assert fname.exists(), "Example {example} do not exists."
+            return cls.from_file(fname)
 
     def hillshade(self, **kwargs):
         """Returns hillshade
@@ -585,73 +762,6 @@ class DEMGrid:
             stretch=kwargs.get("stretch", True),
             title=kwargs.get("title", f"TPI({self.title})"),
         )
-
-    def overlay(self, over, invert=False):
-        """Create RGBimage of overlied datasets in HSV space
-
-        Args:
-            invert(bool): Default False
-
-        """
-        img_array = plt.get_cmap(self.cmap)(self.normalized().data)
-        hsv = clr.rgb_to_hsv(img_array[:, :, :3])
-        if invert:
-            hsv[:, :, 2] = 1 - over.normalized().data
-        else:
-            hsv[:, :, 2] = over.normalized().data
-        rgb = clr.hsv_to_rgb(hsv)
-        return RGBimage(
-            rioplot.reshape_as_raster(rgb),
-            figsize=self.figsize,
-            title=f"{over.title}/{self.title}",
-            **self.meta,
-        )
-
-    def show(self, **kwargs):
-        """Show dataset
-
-        Args:
-            contour(bool): Show data as contours. Default `False`
-            contour_label_kws(dict): Default None
-            cmap (str, optional): Colormap. Default is `"terrain"`
-            stretch (bool, optional): Stretch colormap. Default is `False`
-            title (str, optional): title of dataset. Default is `"DEM"`
-            figsize (tuple, optional): matplotlib figure size.
-
-        """
-        contour = kwargs.pop("contour", False)
-        contour_label_kws = kwargs.pop("contour_label_kws", None)
-        ax = kwargs.pop("ax", None)
-        title = kwargs.pop("title", self.title)
-        transform = kwargs.pop("transform", self.meta["transform"])
-        stretch = kwargs.pop("stretch", self.stretch)
-        figsize = kwargs.pop("figsize", self.figsize)
-        colorbar = kwargs.pop("colorbar", True)
-        if "cmap" not in kwargs:
-            kwargs["cmap"] = self.cmap
-        if stretch:
-            kwargs["vmin"], kwargs["vmax"] = np.percentile(self._values, [2, 98])
-        if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
-        else:  # externally created fig, so no colorbar
-            colorbar = False
-        rioax = rioplot.show(
-            self.data,
-            contour=contour,
-            contour_label_kws=contour_label_kws,
-            ax=ax,
-            title=title,
-            transform=transform,
-            **kwargs,
-        )
-        if colorbar:
-            divider = make_axes_locatable(ax)
-            cax = divider.append_axes("right", size="5%", pad=0.05)
-            if contour:
-                fig.colorbar(rioax.collections[0], cax=cax)  # type: ignore
-            else:
-                fig.colorbar(rioax.images[0], cax=cax)  # type: ignore
-        plt.show()
 
 
 class RGBimage:

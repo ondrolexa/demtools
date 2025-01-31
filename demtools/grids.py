@@ -13,7 +13,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
 from scipy.ndimage import gaussian_filter
-from scipy.signal import medfilt2d, ss2tf
+from scipy.signal import medfilt2d
 
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
@@ -23,11 +23,16 @@ class DEMGrid:
 
     Args:
         data (numpy.ma.MaskedArray): data as masked numpy array
-        meta (dict): rasterio metadata
         cmap (str, optional): Colormap. Default is `"terrain"`
         stretch (bool, optional): Stretch colormap. Default is `False`
         title (str, optional): title of dataset. Default is `"DEM"`
         figsize (tuple, optional): matplotlib figure size.
+        driver (str, optional): Default is `"GTiff"`
+        dtype (str, optional): Default is `"float64"`
+        nodata (float, optional): Default is `-9999.0`
+        compress (str, optional): Default is `"lzw"`
+        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
+        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
 
     Attributes:
         min (float): minimum of data
@@ -83,7 +88,7 @@ class DEMGrid:
         """
         datapath = importlib.resources.files("demtools") / "data"
         if example is None:
-            print(f"Available examples: {[f.stem for f in datapath.glob('*.tif')]}")
+            print(f"Available examples: {[f.stem for f in datapath.glob('*.tif')]}")  # type: ignore
         else:
             fname = (datapath / example).with_suffix(".tif")
             assert fname.exists(), "Example {example} do not exists."
@@ -189,6 +194,14 @@ class DEMGrid:
         )
 
     def inverted(self, **kwargs):
+        """Returns inverted dataset
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"NORM(...)"'.
+
+        """
         return self.clone(
             self.data.max() - self.data + self.data.min(),
             cmap=kwargs.get("cmap", "bone_r"),
@@ -206,8 +219,13 @@ class DEMGrid:
             with memfile.open() as dataset:  # Reopen as DatasetReader
                 yield dataset  # Note yield not return
 
-    def resample(self, scale=1):
-        """Resample grid"""
+    def resample(self, scale=1, **kwargs):
+        """Returns resampled dataset
+
+        Args:
+            scale (float, optional): Resampling scale. Default `1`.
+
+        """
         t = self.meta["transform"]
         transform = Affine(t.a / scale, t.b, t.c, t.d, t.e / scale, t.f)
         height = int(self.meta["height"] * scale)
@@ -221,16 +239,28 @@ class DEMGrid:
                 resampling=Resampling.bilinear,
                 masked=True,
             )
-        return DEMGrid(data, **meta)
+        return DEMGrid(data, **kwargs, **meta)
 
     def sample(self, pts):
-        """Return array of values for sample points"""
+        """Returns array of values for sample points
+
+        Args:
+            pts(iterable): Pairs of x, y coordinates in the dataset’s reference system.
+
+        """
         with self.asdataset() as src:
             res = np.array([*riosample.sample_gen(src, pts)]).flatten()
         return res
 
     def sample_line(self, p1, p2, n=10):
-        """Return array of values along line defined by endpoints p1 and p2"""
+        """Returns array of values along line defined by endpoints p1 and p2
+
+        Args:
+            p1(tuple): Pair of x, y coordinates in the dataset’s reference system
+            p2(tuple): Pair of x, y coordinates in the dataset’s reference system
+            n(int, optional): NUmber of points sampled along line. Default `10`
+
+        """
         pts = (
             (p1[0] + k * (p2[0] - p1[0]), p1[1] + k * (p2[1] - p1[1]))
             for k in np.linspace(0, 1, n)
@@ -238,7 +268,14 @@ class DEMGrid:
         return self.sample(pts)
 
     def dx(self, **kwargs):
-        """Horizontal derivative dx"""
+        """Returns horizontal derivative dx
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"dx(...)"'.
+
+        """
         return self.clone(
             self._dx,
             cmap=kwargs.get("cmap", "bone_r"),
@@ -247,7 +284,14 @@ class DEMGrid:
         )
 
     def dy(self, **kwargs):
-        """Horizontal derivative dy"""
+        """Returns horizontal derivative dy
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"dy(...)"'.
+
+        """
         return self.clone(
             self._dy,
             cmap=kwargs.get("cmap", "bone_r"),
@@ -256,7 +300,14 @@ class DEMGrid:
         )
 
     def dz(self, **kwargs):
-        """Vertical derivative dz"""
+        """Returns vertical derivative dz
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"dz(...)"'.
+
+        """
         return self.clone(
             np.ma.masked_array(self._dz, mask=self._dx.mask | self._dy.mask),
             cmap=kwargs.get("cmap", "bone_r"),
@@ -265,7 +316,14 @@ class DEMGrid:
         )
 
     def upcont(self, h, **kwargs):
-        """Upward continuation"""
+        """Returns upward continuation
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"up(...)"'.
+
+        """
         up = upcontinue(
             self.data, self.meta["transform"].a, self.meta["transform"].e, h
         )
@@ -277,7 +335,14 @@ class DEMGrid:
         )
 
     def thd(self, **kwargs):
-        """Total horizontal derivative"""
+        """Returns total horizontal derivative
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"THD(...)"'.
+
+        """
         return self.clone(
             self._thd,
             cmap=kwargs.get("cmap", "bone_r"),
@@ -286,7 +351,14 @@ class DEMGrid:
         )
 
     def tga(self, **kwargs):
-        """Total gradient amplitude (also called the analytic signal)"""
+        """Returns total gradient amplitude (also called the analytic signal)
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"TGA(...)"'.
+
+        """
         return self.clone(
             self._tga,
             cmap=kwargs.get("cmap", "bone_r"),
@@ -295,7 +367,14 @@ class DEMGrid:
         )
 
     def theta(self, **kwargs):
-        """Theta - total horizontal derivative divided by the analytical signal"""
+        """Returns theta - total horizontal derivative divided by the analytical signal
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"Theta(...)"'.
+
+        """
         return self.clone(
             self._thd / self._tga,
             cmap=kwargs.get("cmap", "bone_r"),
@@ -304,7 +383,14 @@ class DEMGrid:
         )
 
     def nthd(self, **kwargs):
-        """Normalized total horizontal derivative"""
+        """Returns normalized total horizontal derivative
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"NTHD(...)"'.
+
+        """
         return self.clone(
             np.real(np.arctan2(self._thd, np.absolute(self._dz))),
             cmap=kwargs.get("cmap", "bone_r"),
@@ -313,7 +399,14 @@ class DEMGrid:
         )
 
     def tilt(self, **kwargs):
-        """Calculate the tilt angle in radians"""
+        """Returns tilt angle in radians
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"Tilt(...)"'.
+
+        """
         return self.clone(
             np.arctan2(self._dz, self._thd),
             cmap=kwargs.get("cmap", "bone_r"),
@@ -322,7 +415,15 @@ class DEMGrid:
         )
 
     def gaussian_filter(self, **kwargs):
-        """Gaussian filter"""
+        """Returns Gaussian filtered dataset
+
+        Args:
+            sigma(float): Standard deviation for Gaussian kernel. Default 1
+            cmap (str, optional): Colormap. Default keep original.
+            stretch (bool, optional): Stretch colormap. Default keep original.
+            title (str, optional): title of dataset. Default '"G(...)"'.
+
+        """
         sigma = kwargs.get("sigma", 1)
         filtered = gaussian_filter(self.data.filled(np.nan), sigma)
         return self.clone(
@@ -337,7 +438,16 @@ class DEMGrid:
         )
 
     def median(self, **kwargs):
-        """Median filter"""
+        """Returns median filtered dataset
+
+        Args:
+            kernel_size(int): A scalar or a list of length 2, giving the size
+                of the median filter window. Default 3
+            cmap (str, optional): Colormap. Default keep original.
+            stretch (bool, optional): Stretch colormap. Default keep original.
+            title (str, optional): title of dataset. Default '"M(...)"'.
+
+        """
         kernel_size = kwargs.get("kernel_size", 3)
         mask_zero = kwargs.get("mask_zero", True)
         filtered = medfilt2d(self.data.filled(np.nan), kernel_size)
@@ -355,6 +465,16 @@ class DEMGrid:
         )
 
     def hillshade(self, **kwargs):
+        """Returns hillshade
+
+        Args:
+            azdeg(float): The azimuth (0-360, degrees clockwise from North) of
+                the light source. Default 150
+            altdeg(float): The altitude (0-90, degrees up from horizontal) of
+                the light source. Default 40
+            vert_ezag(float): The amount to exaggerate the elevation values by
+                when calculating illumination
+        """
         vert_exag = kwargs.get("vert_exag", 1)
         azdeg = kwargs.get("azdeg", 150)
         altdeg = kwargs.get("altdeg", 40)
@@ -375,6 +495,18 @@ class DEMGrid:
         )
 
     def shade(self, **kwargs):
+        """Show combined colormapped data values with an illumination intensity map
+
+        Args:
+            azdeg(float): The azimuth (0-360, degrees clockwise from North) of
+                the light source. Default 150
+            altdeg(float): The altitude (0-90, degrees up from horizontal) of
+                the light source. Default 40
+            vert_ezag(float): The amount to exaggerate the elevation values by
+                when calculating illumination
+            blend_mode(str): The type of blending. Default `"overlay"`
+
+        """
         azdeg = kwargs.get("azdeg", 150)
         altdeg = kwargs.get("altdeg", 40)
         ls = clr.LightSource(azdeg=azdeg, altdeg=altdeg)
@@ -393,6 +525,17 @@ class DEMGrid:
         )
 
     def tpi(self, **kwargs):
+        """Calculate Topographic Position Index (TPI)
+
+        Args:
+            win(numpy.array, optional): operation window. Default rectangle 2*r + 1
+            r(int, optional): radius of window. Default `5`
+            cmap (str, optional): Colormap. Default `"seismic"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): title of dataset. Default '"TPI(...)"'.
+
+        """
+
         def view(offset_y, offset_x, shape):
             size_y, size_x = shape
             x, y = abs(offset_x), abs(offset_y)
@@ -444,6 +587,12 @@ class DEMGrid:
         )
 
     def overlay(self, over, invert=False):
+        """Create RGBimage of overlied datasets in HSV space
+
+        Args:
+            invert(bool): Default False
+
+        """
         img_array = plt.get_cmap(self.cmap)(self.normalized().data)
         hsv = clr.rgb_to_hsv(img_array[:, :, :3])
         if invert:
@@ -459,6 +608,17 @@ class DEMGrid:
         )
 
     def show(self, **kwargs):
+        """Show dataset
+
+        Args:
+            contour(bool): Show data as contours. Default `False`
+            contour_label_kws(dict): Default None
+            cmap (str, optional): Colormap. Default is `"terrain"`
+            stretch (bool, optional): Stretch colormap. Default is `False`
+            title (str, optional): title of dataset. Default is `"DEM"`
+            figsize (tuple, optional): matplotlib figure size.
+
+        """
         contour = kwargs.pop("contour", False)
         contour_label_kws = kwargs.pop("contour_label_kws", None)
         ax = kwargs.pop("ax", None)
@@ -495,9 +655,24 @@ class DEMGrid:
 
 
 class RGBimage:
+    """A class to store RGB dataset.
+
+    Args:
+        data (numpy.array): data as 3d numpy array
+        title (str, optional): title of dataset. Default is `"RGB"`
+        figsize (tuple, optional): matplotlib figure size.
+        driver (str, optional): Default is `"GTiff"`
+        dtype (str, optional): Default is `"float64"`
+        nodata (float, optional): Default is `-9999.0`
+        compress (str, optional): Default is `"lzw"`
+        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
+        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+
+    """
+
     def __init__(self, rgb, **kwargs):
         self.data = rgb
-        self.title = kwargs.pop("title", "RGB image")
+        self.title = kwargs.pop("title", "RGB")
         self.figsize = kwargs.pop("figsize", plt.rcParams["figure.figsize"])
         self.meta = {
             "driver": "GTiff",
@@ -511,12 +686,30 @@ class RGBimage:
         }
         self.meta.update(kwargs)
         self.meta["count"] = 3
+        assert rgb.shape == (
+            3,
+            self.meta["height"],
+            self.meta["width"],
+        ), "Wrong metadata !"
 
     def write_tif(self, filename):
+        """Write dataset to file
+
+        Args:
+            filename (str): filename
+
+        """
         with rio.open(filename, "w", **self.meta) as dst:
             dst.write(self.data)
 
     def show(self, **kwargs):
+        """Show RGB dataset
+
+        Args:
+            title (str, optional): title of dataset. Default is `"DEM"`
+            figsize (tuple, optional): matplotlib figure size.
+
+        """
         ax = kwargs.pop("ax", None)
         title = kwargs.pop("title", self.title)
         transform = kwargs.pop("transform", self.meta["transform"])

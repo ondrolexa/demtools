@@ -8,6 +8,13 @@ EPMAtools provides following classes:
 DEMGrid
 -------
 
-.. automodule:: demtools.grids
+.. autoclass:: demtools.grids.DEMGrid
+    :members:
+    :inherited-members:
+
+RGBimage
+--------
+
+.. autoclass:: demtools.grids.RGBimage
     :members:
     :inherited-members:

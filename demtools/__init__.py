@@ -1,3 +1,3 @@
-from demtools.grids import DEMGrid, FloatGrid
+from demtools.grids import BoolGrid, DEMGrid, FloatGrid, IntGrid
 
-__all__ = ("DEMGrid", "FloatGrid")
+__all__ = ("DEMGrid", "FloatGrid", "IntGrid", "BoolGrid")

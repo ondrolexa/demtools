@@ -19,12 +19,10 @@ from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
 
 class Grid:
-    KIND = ""
+    dtype = None
 
     def __init__(self, data, **kwargs):
-        self.cmap = kwargs.get("cmap", "viridis")
-        self.stretch = kwargs.get("stretch", True)
-        self.title = kwargs.get("title", "Grid")
+        self.stretch = kwargs.get("stretch", False)
         self.figsize = kwargs.get("figsize", plt.rcParams["figure.figsize"])
         self.meta = {
             "driver": "",
@@ -38,6 +36,12 @@ class Grid:
             "transform": Affine(1.0, 0.0, 0, 0.0, -1.0, 0),
         }
         self.meta.update((k, v) for k, v in kwargs.items() if k in self.meta)
+        if not isinstance(data, np.ma.MaskedArray):
+            data = np.ma.masked_array(
+                np.asarray(data, dtype=np.dtype(self.__class__.dtype)),
+                mask=np.isnan(data),
+                fill_value=self.data.fill_value,
+            )
         assert data.shape == (
             self.meta["height"],
             self.meta["width"],
@@ -46,11 +50,6 @@ class Grid:
         if data.mask.ndim < 2:
             data.mask = np.ones(data.shape, dtype="bool") * data.mask
         self.data = data
-        if not data.dtype.name.startswith(self.__class__.KIND):
-            raise ValueError(
-                f"Data type {data.dtype.name} is not valid for {self.__class__.__name__}. "
-                + f"Must be {self.__class__.KIND}."
-            )
 
     def __repr__(self):
         return (
@@ -217,11 +216,12 @@ class Grid:
             figsize (tuple, optional): matplotlib figure size. Default keep original.
 
         """
+        assert isinstance(data, np.ndarray), "Data must be the numpy.ndarray."
         typObj = kwargs.pop("astype", type(self))
         return typObj(
             data,
             cmap=kwargs.get("cmap", self.cmap),
-            stretch=kwargs.get("stretch", self.stretch),
+            # stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", self.title),
             figsize=kwargs.get("figsize", self.figsize),
             **self.meta,
@@ -239,6 +239,13 @@ class Grid:
 
     @classmethod
     def from_file(cls, filename, **kwargs):
+        """Read dataset from georeferenced file
+
+        Args:
+            filename(str): Filename to read.
+            band(int, optional): Band to read. Default 1.
+
+        """
         band = kwargs.get("band", 1)
         with rio.open(filename) as src:
             data = src.read(band, masked=True)
@@ -246,7 +253,7 @@ class Grid:
         return cls(data, **kwargs, **meta)
 
     def write_tif(self, filename):
-        """Write dataset to file
+        """Write dataset to georeferenced file
 
         Args:
             filename (str): filename
@@ -264,6 +271,48 @@ class Grid:
     @property
     def _values(self):
         return np.asarray(self.data[~self.data.mask])
+
+    def _kernel(self, **kwargs):
+        def view(offset_y, offset_x, shape):
+            size_y, size_x = shape
+            x, y = abs(offset_x), abs(offset_y)
+            x_in = slice(x, size_x)
+            x_out = slice(0, size_x - x)
+            y_in = slice(y, size_y)
+            y_out = slice(0, size_y - y)
+            # the swapping trick
+            if offset_x < 0:
+                x_in, x_out = x_out, x_in
+            if offset_y < 0:
+                y_in, y_out = y_out, y_in
+            # return window view (in) and main view (out)
+            return np.s_[y_in, x_in], np.s_[y_out, x_out]
+
+        win = kwargs.get("win", None)
+        if win is None:
+            r = kwargs.get("r", 5)
+            win = np.ones((2 * r + 1, 2 * r + 1))
+
+        r_y, r_x = win.shape[0] // 2, win.shape[1] // 2
+        if kwargs.get("exclude_centre", False):
+            win[r_y, r_x] = 0
+        # matrices for temporary data
+        n_sum = np.zeros(self.data.shape)
+        n_count = np.zeros(self.data.shape)
+
+        for (y, x), weight in np.ndenumerate(win):
+            if weight == 0:
+                continue  # skip zero values !
+            # determine views to extract data
+            view_in, view_out = view(y - r_y, x - r_x, self.data.shape)
+            n_sum[view_out] += self.data.filled(0)[view_in] * weight
+            weight_array = weight * np.ones(self.data.shape)
+            weight_array[self.data.mask] = 0
+            n_count[view_out] += weight_array[view_in]
+
+        n_sum[self.data.mask] = np.nan
+        n_count[self.data.mask] = np.nan
+        return n_sum, n_count
 
     def sample(self, pts):
         """Returns array of values for sample points
@@ -325,11 +374,30 @@ class Grid:
 
 
 class BoolGrid(Grid):
-    KIND = "bool"
+    """A class to store boolean data.
+
+    Args:
+        data (numpy.ma.MaskedArray): data as masked numpy array
+        cmap (str, optional): Colormap. Default is `"binary"`
+        title (str, optional): Title of dataset. Default is `"Bool"`
+        figsize (tuple, optional): matplotlib figure size.
+        driver (str, optional): Default is `"GTiff"`
+        dtype (str, optional): Default is `"float64"`
+        compress (str, optional): Default is `"lzw"`
+        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
+        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+
+    Attributes:
+        unique_values (numpy.ndarray): array of unique values
+
+    """
+
+    dtype = "bool"
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
         self.cmap = kwargs.get("cmap", "binary")
+        self.title = kwargs.get("title", "Bool")
 
     def __and__(self, other):
         if isinstance(other, BoolGrid):
@@ -348,12 +416,41 @@ class BoolGrid(Grid):
     def __neg__(self):
         return self.clone(np.logical_not(self.data))
 
+    @property
+    def count_true(self):
+        return np.sum(self._values).item()
+
+    @property
+    def count_false(self):
+        return np.sum(~self._values).item()
+
 
 class IntGrid(Grid):
-    KIND = "int"
+    """A class to store discrete data.
+
+    Args:
+        data (numpy.ma.MaskedArray): data as masked numpy array
+        cmap (str, optional): Colormap. Default is `"viridis"`
+        title (str, optional): Title of dataset. Default is `"IntGrid"`
+        figsize (tuple, optional): matplotlib figure size.
+        driver (str, optional): Default is `"GTiff"`
+        dtype (str, optional): Default is `"float64"`
+        nodata (float, optional): Default is `-9999.0`
+        compress (str, optional): Default is `"lzw"`
+        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
+        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+
+    Attributes:
+        unique_values (numpy.ndarray): array of unique values
+
+    """
+
+    dtype = "int"
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
+        self.cmap = kwargs.get("cmap", "viridis")
+        self.title = kwargs.get("title", "IntGrid")
 
     def __truediv__(self, other):
         if isinstance(other, DEMGrid):
@@ -391,12 +488,67 @@ class IntGrid(Grid):
             fname = datapath / "int.tif"
         return cls.from_file(fname)
 
+    @property
+    def unique_values(self):
+        return np.unique(self._values)
+
+    def counts(self, **kwargs):
+        """Count occurences of values in grid
+
+        Args:
+            plot(bool, optional): If True, show bar plot, otherwise returns (values, counts)
+
+        """
+        values, pos = np.unique(self._values, return_inverse=True)
+        counts = np.bincount(pos)
+        if kwargs.pop("plot", False):
+            plt.bar(values, counts, **kwargs)
+            plt.show()
+        else:
+            return values, counts
+
+    def moving_average(self, **kwargs):
+        """Returns moving window average
+
+        Args:
+            win(numpy.ndarray, optional): Numpy array of zeros and ones define window size and filter.
+                Default is None
+            r(int, optional): Define win halfsize if win is None. Shape of win is (2*r+1, 2*r+1)
+
+        """
+        n_sum, n_count = self._kernel(**kwargs)
+        return self.clone(n_sum // n_count, **kwargs)
+
 
 class FloatGrid(Grid):
-    KIND = "float"
+    """A class to store continuos data.
+
+    Args:
+        data (numpy.ma.MaskedArray): data as masked numpy array
+        cmap (str, optional): Colormap. Default is `"viridis"`
+        stretch (bool, optional): Stretch colormap to 2-98 percentil. Default is `True`
+        title (str, optional): Title of dataset. Default is `"FloatGrid"`
+        figsize (tuple, optional): matplotlib figure size.
+        driver (str, optional): Default is `"GTiff"`
+        dtype (str, optional): Default is `"float64"`
+        nodata (float, optional): Default is `-9999.0`
+        compress (str, optional): Default is `"lzw"`
+        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
+        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+
+    Attributes:
+        min (float): minimum of data
+        max (float): maximum of data
+
+    """
+
+    dtype = "float"
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
+        self.stretch = kwargs.get("stretch", True)
+        self.cmap = kwargs.get("cmap", "viridis")
+        self.title = kwargs.get("title", "FloatGrid")
 
     @cached_property
     def _dx(self):
@@ -444,10 +596,10 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"NORM(...)"'.
 
         """
+        kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
         return self.clone(
             (self.data - self.data.min()) / (self.data.max() - self.data.min()),
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"NORM({self.title})"),
+            **kwargs,
         )
 
     def inverted(self, **kwargs):
@@ -459,34 +611,49 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"NORM(...)"'.
 
         """
-        return self.clone(
-            self.data.max() - self.data + self.data.min(),
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"INV({self.title})"),
-        )
+        kwargs["title"] = kwargs.get("title", f"INV({self.title})")
+        return self.clone(self.data.max() - self.data + self.data.min(), **kwargs)
 
-    def digitize(self, bins, **kwargs):
+    def moving_average(self, **kwargs):
+        """Returns moving window average
+
+        Args:
+            win(numpy.ndarray, optional): Numpy array of zeros and ones define window size and filter.
+                Default is None
+            r(int, optional): Define win halfsize if win is None. Shape of win is (2*r+1, 2*r+1)
+
+        """
+        n_sum, n_count = self._kernel(**kwargs)
+        return self.clone(n_sum / n_count, **kwargs)
+
+    def digitize(self, **kwargs):
         """Return the IntGrid with indices of the bins to which each value belongs
 
         Args:
-            bins (array_like): Array of bins. It has to be 1-dimensional and monotonic.
-            right(bool, optional): Indicating whether the intervals include the right
-                or the left bin edge. See numpy.digitize for more details. Default `False`
+            bins (int or sequence of scalars or str, optional): If bins is an int,
+                it defines the number of equal-width bins in the given range. If
+                bins is a sequence, it defines the bin edges, including the
+                rightmost edge, allowing for non-uniform bin widths. If string,
+                see np.histogram_bin_edges. Default `auto`
             cmap (str, optional): Colormap. Default keep original.
             title (str, optional): Title of dataset. Default '"DIG"'.
         """
         right = kwargs.get("right", False)
+        bins = np.histogram_bin_edges(
+            self._values,
+            bins=kwargs.get("bins", "auto"),
+            range=kwargs.get("range", None),
+        )
         data = np.digitize(self.data, bins, right=right)
-        return IntGrid(
+        kwargs["title"] = kwargs.get("title", f"DIG({self.title})")
+        return self.clone(
             np.ma.masked_array(
                 data,
                 mask=self.data.mask,
                 fill_value=self.data.fill_value,
             ),
-            cmap=kwargs.get("cmap", self.cmap),
-            title=kwargs.get("title", "DIG"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=IntGrid,
+            **kwargs,
         )
 
     def resample(self, scale, **kwargs):
@@ -509,7 +676,7 @@ class FloatGrid(Grid):
                 resampling=Resampling.bilinear,
                 masked=True,
             )
-        return type(self)(data, **kwargs, **meta)
+        return self.clone(data, **kwargs, **meta)
 
     def dx(self, **kwargs):
         """Returns horizontal derivative dx
@@ -520,12 +687,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"dx(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"dx({self.title})")
+        return self.clone(
             self._dx,
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"dx({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def dy(self, **kwargs):
@@ -537,12 +704,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"dy(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"dy({self.title})")
+        return self.clone(
             self._dy,
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"dy({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def dz(self, **kwargs):
@@ -554,12 +721,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"dz(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"dz({self.title})")
+        return self.clone(
             np.ma.masked_array(self._dz, mask=self._dx.mask | self._dy.mask),
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"dz({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def upcont(self, h, **kwargs):
@@ -574,12 +741,12 @@ class FloatGrid(Grid):
         up = upcontinue(
             self.data, self.meta["transform"].a, self.meta["transform"].e, h
         )
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"up({self.title})")
+        return self.clone(
             np.ma.masked_array(up, mask=self._dx.mask | self._dy.mask),
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"up({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def thd(self, **kwargs):
@@ -591,12 +758,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"THD(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"THD({self.title})")
+        return self.clone(
             self._thd,
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"THD({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def tga(self, **kwargs):
@@ -608,12 +775,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"TGA(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"TGA({self.title})")
+        return self.clone(
             self._tga,
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"TGA({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def theta(self, **kwargs):
@@ -625,12 +792,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"Theta(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"Theta({self.title})")
+        return self.clone(
             self._thd / self._tga,
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"Theta({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def nthd(self, **kwargs):
@@ -642,12 +809,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"NTHD(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"NTHD({self.title})")
+        return self.clone(
             np.real(np.arctan2(self._thd, np.absolute(self._dz))),
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"NTHD({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def tilt(self, **kwargs):
@@ -659,12 +826,12 @@ class FloatGrid(Grid):
             title (str, optional): Title of dataset. Default '"Tilt(...)"'.
 
         """
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "bone_r")
+        kwargs["title"] = kwargs.get("title", f"Tilt({self.title})")
+        return self.clone(
             np.arctan2(self._dz, self._thd),
-            cmap=kwargs.get("cmap", "bone_r"),
-            title=kwargs.get("title", f"Tilt({self.title})"),
-            figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
     def gaussian_filter(self, **kwargs):
@@ -679,15 +846,14 @@ class FloatGrid(Grid):
         """
         sigma = kwargs.get("sigma", 1)
         filtered = gaussian_filter(self.data.filled(np.nan), sigma)
+        kwargs["title"] = kwargs.get("title", f"G({self.title}, {sigma})")
         return self.clone(
             np.ma.masked_array(
                 filtered,
                 mask=np.isnan(filtered) | self.data.mask,
                 fill_value=self.data.fill_value,
             ),
-            cmap=kwargs.get("cmap", self.cmap),
-            stretch=kwargs.get("stretch", self.stretch),
-            title=kwargs.get("title", f"G({self.title}, {sigma})"),
+            **kwargs,
         )
 
     def median(self, **kwargs):
@@ -702,19 +868,15 @@ class FloatGrid(Grid):
 
         """
         kernel_size = kwargs.get("kernel_size", 3)
-        mask_zero = kwargs.get("mask_zero", True)
         filtered = medfilt2d(self.data.filled(np.nan), kernel_size)
+        kwargs["title"] = kwargs.get("title", f"M({self.title}, {kernel_size})")
         return self.clone(
             np.ma.masked_array(
                 filtered,
-                mask=np.isnan(filtered)
-                | self.data.mask
-                | ((filtered == 0.0) & mask_zero),
+                mask=np.isnan(filtered) | self.data.mask,
                 fill_value=self.data.fill_value,
             ),
-            cmap=kwargs.get("cmap", self.cmap),
-            stretch=kwargs.get("stretch", self.stretch),
-            title=kwargs.get("title", f"M({self.title}, {kernel_size})"),
+            **kwargs,
         )
 
     def overlay(self, over, invert=False):
@@ -806,7 +968,7 @@ class DEMGrid(FloatGrid):
         max (float): maximum of data
 
     Example:
-        >>> d = DEMGrid.from_exmaples('smalldem')
+        >>> d = DEMGrid.from_examples('smalldem')
         >>> d.show()
 
     """
@@ -853,15 +1015,11 @@ class DEMGrid(FloatGrid):
             dx=self.meta["transform"].a,
             dy=self.meta["transform"].e,
         )
-        return FloatGrid(
-            hs,
-            cmap=kwargs.get("cmap", "gray"),
-            stretch=kwargs.get("stretch", self.stretch),
-            title=kwargs.get(
-                "title", f"Hillshade({self.title}, {vert_exag}, {azdeg}, {altdeg})"
-            ),
-            **self.meta,
+        kwargs["cmap"] = kwargs.get("cmap", "gray")
+        kwargs["title"] = kwargs.get(
+            "title", f"Hillshade({self.title}, {vert_exag}, {azdeg}, {altdeg})"
         )
+        return self.clone(hs, astype=FloatGrid, **kwargs)
 
     def shade(self, **kwargs):
         """Show combined colormapped data values with an illumination intensity map
@@ -904,55 +1062,19 @@ class DEMGrid(FloatGrid):
             title (str, optional): Title of dataset. Default '"TPI(...)"'.
 
         """
-
-        def view(offset_y, offset_x, shape):
-            size_y, size_x = shape
-            x, y = abs(offset_x), abs(offset_y)
-            x_in = slice(x, size_x)
-            x_out = slice(0, size_x - x)
-            y_in = slice(y, size_y)
-            y_out = slice(0, size_y - y)
-            # the swapping trick
-            if offset_x < 0:
-                x_in, x_out = x_out, x_in
-            if offset_y < 0:
-                y_in, y_out = y_out, y_in
-            # return window view (in) and main view (out)
-            return np.s_[y_in, x_in], np.s_[y_out, x_out]
-
-        win = kwargs.get("win", None)
-        if win is None:
-            r = kwargs.get("r", 5)
-            win = np.ones((2 * r + 1, 2 * r + 1))
-
-        r_y, r_x = win.shape[0] // 2, win.shape[1] // 2
-        win[r_y, r_x] = 0  # ensure the central cell is zero
-        # matrices for temporary data
-        n_sum = np.zeros(self.data.shape)
-        n_count = np.zeros(self.data.shape)
-
-        for (y, x), weight in np.ndenumerate(win):
-            if weight == 0:
-                continue  # skip zero values !
-            # determine views to extract data
-            view_in, view_out = view(y - r_y, x - r_x, self.data.shape)
-            # using window weights (eg. for a Gaussian function)
-            n_sum[view_out] += self.data.filled(np.nan)[view_in] * weight
-            # track the number of neighbours
-            # (this is used for weighted mean : Σ weights*val / Σ weights)
-            n_count[view_out] += weight
-
+        n_sum, n_count = self._kernel(exclude_centre=True, **kwargs)
         # this is TPI (spot height – average neighbourhood height)
         tpi = self.data.filled(np.nan) - n_sum / n_count
-        return FloatGrid(
+        kwargs["cmap"] = kwargs.get("cmap", "seismic")
+        kwargs["title"] = kwargs.get("title", f"TPI({self.title})")
+        return self.clone(
             np.ma.masked_array(
                 tpi,
                 mask=np.isnan(tpi) | self.data.mask,
                 fill_value=self.data.fill_value,
             ),
-            cmap=kwargs.get("cmap", "seismic"),
-            title=kwargs.get("title", f"TPI({self.title})"),
-            **self.meta,
+            astype=FloatGrid,
+            **kwargs,
         )
 
 

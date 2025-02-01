@@ -1,4 +1,5 @@
 import importlib.resources
+from collections import Counter
 from contextlib import contextmanager
 from functools import cached_property
 
@@ -12,8 +13,7 @@ import rasterio.sample as riosample
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
-from scipy.ndimage import gaussian_filter
-from scipy.signal import medfilt2d
+from scipy.ndimage import convolve, gaussian_filter, generic_filter, median_filter
 
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
@@ -40,7 +40,7 @@ class Grid:
             data = np.ma.masked_array(
                 np.asarray(data, dtype=np.dtype(self.__class__.dtype)),
                 mask=np.isnan(data),
-                fill_value=self.data.fill_value,
+                fill_value=self.meta["nodata"],
             )
         assert data.shape == (
             self.meta["height"],
@@ -65,6 +65,16 @@ class Grid:
         else:
             data.mask = np.logical_or(self.data.mask, ~mask)
         return self.clone(data)
+
+    def __setitem__(self, mask, value):
+        value = np.array(value, np.dtype(self.__class__.dtype))
+        if value.ndim > 0:
+            value = value.flatten()[0]
+        if isinstance(mask, BoolGrid):
+            mask2 = np.logical_and(~self.data.mask, mask.data.data)
+        else:
+            mask2 = np.logical_and(~self.data.mask, mask)
+        self.data[mask2] = value.item()
 
     def __add__(self, other):
         if issubclass(type(other), Grid):
@@ -273,45 +283,18 @@ class Grid:
         return np.asarray(self.data[~self.data.mask])
 
     def _kernel(self, **kwargs):
-        def view(offset_y, offset_x, shape):
-            size_y, size_x = shape
-            x, y = abs(offset_x), abs(offset_y)
-            x_in = slice(x, size_x)
-            x_out = slice(0, size_x - x)
-            y_in = slice(y, size_y)
-            y_out = slice(0, size_y - y)
-            # the swapping trick
-            if offset_x < 0:
-                x_in, x_out = x_out, x_in
-            if offset_y < 0:
-                y_in, y_out = y_out, y_in
-            # return window view (in) and main view (out)
-            return np.s_[y_in, x_in], np.s_[y_out, x_out]
-
         win = kwargs.get("win", None)
         if win is None:
             r = kwargs.get("r", 5)
             win = np.ones((2 * r + 1, 2 * r + 1))
-
-        r_y, r_x = win.shape[0] // 2, win.shape[1] // 2
         if kwargs.get("exclude_centre", False):
-            win[r_y, r_x] = 0
-        # matrices for temporary data
-        n_sum = np.zeros(self.data.shape)
-        n_count = np.zeros(self.data.shape)
-
-        for (y, x), weight in np.ndenumerate(win):
-            if weight == 0:
-                continue  # skip zero values !
-            # determine views to extract data
-            view_in, view_out = view(y - r_y, x - r_x, self.data.shape)
-            n_sum[view_out] += self.data.filled(0)[view_in] * weight
-            weight_array = weight * np.ones(self.data.shape)
-            weight_array[self.data.mask] = 0
-            n_count[view_out] += weight_array[view_in]
-
+            win[win.shape[0] // 2, win.shape[1] // 2] = 0
+        n_sum = convolve(self.data.filled(0), win, mode="constant")
+        # do not count mask
+        c_grid = np.ones(self.data.shape, dtype=int)
+        c_grid[self.data.mask] = 0
+        n_count = convolve(c_grid, win, mode="constant")
         n_sum[self.data.mask] = np.nan
-        n_count[self.data.mask] = np.nan
         return n_sum, n_count
 
     def sample(self, pts):
@@ -518,6 +501,33 @@ class IntGrid(Grid):
         """
         n_sum, n_count = self._kernel(**kwargs)
         return self.clone(n_sum // n_count, **kwargs)
+
+    def majority_filter(self, **kwargs):
+        """Returns Majority filtered dataset
+
+        Args:
+            size(int): A scalar or a list of length 2, giving the size
+                of the median filter window. Default 3
+            cmap (str, optional): Colormap. Default keep original.
+            stretch (bool, optional): Stretch colormap. Default keep original.
+            title (str, optional): Title of dataset. Default '"M(...)"'.
+
+        """
+
+        def most_common(a):
+            return Counter(a).most_common(1)[0][0].item()
+
+        size = kwargs.get("size", 3)
+        filtered = generic_filter(self.data.data, most_common, size)
+        kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
+        return self.clone(
+            np.ma.masked_array(
+                filtered,
+                mask=np.isnan(filtered) | self.data.mask,
+                fill_value=self.data.fill_value,
+            ),
+            **kwargs,
+        )
 
 
 class FloatGrid(Grid):
@@ -856,20 +866,20 @@ class FloatGrid(Grid):
             **kwargs,
         )
 
-    def median(self, **kwargs):
+    def median_filter(self, **kwargs):
         """Returns median filtered dataset
 
         Args:
-            kernel_size(int): A scalar or a list of length 2, giving the size
+            size(int): A scalar or a list of length 2, giving the size
                 of the median filter window. Default 3
             cmap (str, optional): Colormap. Default keep original.
             stretch (bool, optional): Stretch colormap. Default keep original.
             title (str, optional): Title of dataset. Default '"M(...)"'.
 
         """
-        kernel_size = kwargs.get("kernel_size", 3)
-        filtered = medfilt2d(self.data.filled(np.nan), kernel_size)
-        kwargs["title"] = kwargs.get("title", f"M({self.title}, {kernel_size})")
+        size = kwargs.get("size", 3)
+        filtered = median_filter(self.data.filled(np.nan), size)
+        kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
         return self.clone(
             np.ma.masked_array(
                 filtered,

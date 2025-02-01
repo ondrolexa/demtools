@@ -33,10 +33,7 @@ docs = [
     "sphinx_mdinclude",
     "sphinx_rtd_theme",
 ]
-dev = [
-    "demtools[extra,tests,docs]",
-    "black",
-]
+dev = ["demtools[extra,tests,docs]", "black"]
 
 
 [build-system]
@@ -46,6 +43,9 @@ build-backend = "hatchling.build"
 [tool.black]
 line-length = 88
 extend-exclude = '''.*ui_.*'''
+
+[tool.isort]
+profile = "black"
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "notebooks"]

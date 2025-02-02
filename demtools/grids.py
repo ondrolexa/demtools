@@ -6,6 +6,7 @@ from functools import cached_property
 import matplotlib.colors as clr
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.ma as ma
 import rasterio as rio
 import rasterio.crs as riocrs
 import rasterio.plot as rioplot
@@ -38,41 +39,48 @@ class Grid:
             "transform": Affine(1.0, 0.0, 0, 0.0, -1.0, 0),
         }
         self.meta.update((k, v) for k, v in kwargs.items() if k in self.meta)
-        # check data
-        if not isinstance(data, np.ma.MaskedArray):
-            data = np.ma.masked_array(
-                np.asarray(data, dtype=np.dtype(self.__class__.dtype)),
-                mask=np.isnan(data),
+        # ensure masked array
+        if not isinstance(data, ma.MaskedArray):
+            data = ma.array(
+                data,
+                dtype=np.dtype(self.__class__.dtype),
                 fill_value=self.meta["nodata"],
             )
-        else:
-            data.mask = np.isnan(data.data) | data.mask
+        # fix invalid entries
+        data = ma.fix_invalid(data)
         # validate metadata
         assert data.shape == (
             self.meta["height"],
             self.meta["width"],
         ), "Wrong metadata !"
-        # check mask shape
-        if data.mask.ndim < 2:
-            data.mask = np.ones(data.shape, dtype="bool") * data.mask
         # additional mask
         if (a_mask := kwargs.get("mask", None)) is not None:
-            data.mask = np.asarray(a_mask, dtype=bool) | data.mask
-        self.data = data
+            data[np.asarray(a_mask, dtype=bool)] = ma.masked
+        # expand mask (needed)
+        data[data.mask] = ma.masked
+        self.data = data.copy()
 
     def __repr__(self):
         return (
             f"{self.__class__.__name__} {self.title} "
             + f"[{self.meta['height']},{self.meta['width']}] "
-            + f"masked:{self.data.mask.sum()} EPSG:{self.meta['crs'].to_epsg()}"
+            + f"masked:{self._mask.sum()} EPSG:{self.meta['crs'].to_epsg()}"
         )
+
+    @property
+    def _array(self):
+        return ma.getdata(self.data)
+
+    @property
+    def _mask(self):
+        return ma.getmask(self.data)
 
     def __getitem__(self, mask):
         data = self.data.copy()
         if isinstance(mask, BoolGrid):
-            data.mask = np.logical_or(self.data.mask, ~mask.data.data)
+            data[~mask._mask] = ma.masked
         else:
-            data.mask = np.logical_or(self.data.mask, ~mask)
+            data[~mask] = ma.masked
         return self.clone(data)
 
     def __setitem__(self, mask, value):
@@ -80,9 +88,9 @@ class Grid:
         if value.ndim > 0:
             value = value.flatten()[0]
         if isinstance(mask, BoolGrid):
-            mask2 = np.logical_and(~self.data.mask, mask.data.data)
+            mask2 = np.logical_and(~self._mask, mask._mask)
         else:
-            mask2 = np.logical_and(~self.data.mask, mask)
+            mask2 = np.logical_and(~self._mask, mask)
         self.data[mask2] = value.item()
 
     def __add__(self, other):
@@ -239,7 +247,7 @@ class Grid:
         typObj = kwargs.pop("astype", type(self))
         return typObj(
             data,
-            mask=self.data.mask,
+            mask=self._mask,
             cmap=kwargs.get("cmap", self.cmap),
             # stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", self.title),
@@ -250,7 +258,7 @@ class Grid:
     @contextmanager
     def asdataset(self):
         with MemoryFile() as memfile:
-            # if np.any(self.data.mask):
+            # if np.any(self._mask):
             with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
                 with memfile.open(**self.meta) as dst:
                     dst.write(self.data, 1)
@@ -279,18 +287,18 @@ class Grid:
             filename (str): filename
 
         """
-        if np.any(self.data.mask):
+        if np.any(self._mask):
             with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
                 with rio.open(filename, "w", **self.meta) as dst:
                     dst.write(self.data.filled(np.nan), 1)
-                    dst.write_mask((~self.data.mask * 255).astype("uint8"))
+                    dst.write_mask((~self._mask * 255).astype("uint8"))
         else:
             with rio.open(filename, "w", **self.meta) as dst:
                 dst.write_band(1, self.data.filled())
 
     @property
     def _values(self):
-        return np.asarray(self.data[~self.data.mask])
+        return self.data.compressed()
 
     def _kernel(self, **kwargs):
         win = kwargs.get("win", None)
@@ -302,9 +310,9 @@ class Grid:
         n_sum = convolve(self.data.filled(0), win, mode="constant")
         # do not count mask
         c_grid = np.ones(self.data.shape, dtype=int)
-        c_grid[self.data.mask] = 0
+        c_grid[self._mask] = 0
         n_count = convolve(c_grid, win, mode="constant")
-        n_sum[self.data.mask] = np.nan
+        n_sum[self._mask] = np.nan
         return n_sum, n_count
 
     def sample(self, pts):
@@ -525,10 +533,12 @@ class IntGrid(Grid):
         """
 
         def most_common(a):
+            print(a, type(a))
+            print("-------------------")
             return Counter(a).most_common(1)[0][0].item()
 
         size = kwargs.get("size", 3)
-        filtered = generic_filter(self.data.data, most_common, size)
+        filtered = generic_filter(self.data.filled(), most_common, size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
         return self.clone(filtered, **kwargs)
 
@@ -847,7 +857,7 @@ class FloatGrid(Grid):
         size = kwargs.get("size", 3)
         filtered = median_filter(self.data.filled(np.nan), size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
-        return self.clone(filtered, mask=np.isnan(filtered) | self.data.mask, **kwargs)
+        return self.clone(filtered, mask=np.isnan(filtered) | self._mask, **kwargs)
 
     def overlay(self, over, invert=False):
         """Create RGBimage of overlied datasets in HSV space
@@ -1038,7 +1048,7 @@ class DEMGrid(FloatGrid):
         kwargs["cmap"] = kwargs.get("cmap", "seismic")
         kwargs["title"] = kwargs.get("title", f"TPI({self.title})")
         return self.clone(
-            tpi, mask=np.isnan(tpi) | self.data.mask, astype=FloatGrid, **kwargs
+            tpi, mask=np.isnan(tpi) | self._mask, astype=FloatGrid, **kwargs
         )
 
 

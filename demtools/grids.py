@@ -22,6 +22,8 @@ class Grid:
     dtype = None
 
     def __init__(self, data, **kwargs):
+        self.cmap = kwargs.get("cmap", None)
+        self.title = kwargs.get("title", None)
         self.stretch = kwargs.get("stretch", False)
         self.figsize = kwargs.get("figsize", plt.rcParams["figure.figsize"])
         self.meta = {
@@ -36,12 +38,16 @@ class Grid:
             "transform": Affine(1.0, 0.0, 0, 0.0, -1.0, 0),
         }
         self.meta.update((k, v) for k, v in kwargs.items() if k in self.meta)
+        # check data
         if not isinstance(data, np.ma.MaskedArray):
             data = np.ma.masked_array(
                 np.asarray(data, dtype=np.dtype(self.__class__.dtype)),
                 mask=np.isnan(data),
                 fill_value=self.meta["nodata"],
             )
+        else:
+            data.mask = np.isnan(data.data) | data.mask
+        # validate metadata
         assert data.shape == (
             self.meta["height"],
             self.meta["width"],
@@ -49,6 +55,9 @@ class Grid:
         # check mask shape
         if data.mask.ndim < 2:
             data.mask = np.ones(data.shape, dtype="bool") * data.mask
+        # additional mask
+        if (a_mask := kwargs.get("mask", None)) is not None:
+            data.mask = np.asarray(a_mask, dtype=bool) | data.mask
         self.data = data
 
     def __repr__(self):
@@ -230,6 +239,7 @@ class Grid:
         typObj = kwargs.pop("astype", type(self))
         return typObj(
             data,
+            mask=self.data.mask,
             cmap=kwargs.get("cmap", self.cmap),
             # stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", self.title),
@@ -520,14 +530,7 @@ class IntGrid(Grid):
         size = kwargs.get("size", 3)
         filtered = generic_filter(self.data.data, most_common, size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
-        return self.clone(
-            np.ma.masked_array(
-                filtered,
-                mask=np.isnan(filtered) | self.data.mask,
-                fill_value=self.data.fill_value,
-            ),
-            **kwargs,
-        )
+        return self.clone(filtered, **kwargs)
 
 
 class FloatGrid(Grid):
@@ -563,26 +566,23 @@ class FloatGrid(Grid):
     @cached_property
     def _dx(self):
         """Horizontal derivative dx as numpy array"""
-        return derivx(self.data, self.meta["transform"].a)
+        return derivx(self.data.filled(np.nan), self.meta["transform"].a)
 
     @cached_property
     def _dy(self):
         """Horizontal derivative dy as numpy array"""
-        return derivy(self.data, self.meta["transform"].e)
+        return derivy(self.data.filled(np.nan), self.meta["transform"].e)
 
     @cached_property
     def _dz(self):
         """Vertical derivative dz as numpy array"""
         return derivz(
-            self.data.filled(self._values.mean()),
+            self.data.filled(
+                self._values.mean()
+            ),  # fix with implement fillna extrapolation
             self.meta["transform"].a,
             self.meta["transform"].e,
         )
-
-    @property
-    def _thd(self):
-        """Total horizontal derivative as numpy array"""
-        return np.sqrt(self._dx**2 + self._dy**2)
 
     @property
     def _tga(self):
@@ -609,6 +609,7 @@ class FloatGrid(Grid):
         kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
         return self.clone(
             (self.data - self.data.min()) / (self.data.max() - self.data.min()),
+            astype=FloatGrid,
             **kwargs,
         )
 
@@ -622,7 +623,9 @@ class FloatGrid(Grid):
 
         """
         kwargs["title"] = kwargs.get("title", f"INV({self.title})")
-        return self.clone(self.data.max() - self.data + self.data.min(), **kwargs)
+        return self.clone(
+            self.data.max() - self.data + self.data.min(), astype=FloatGrid, **kwargs
+        )
 
     def moving_average(self, **kwargs):
         """Returns moving window average
@@ -648,23 +651,16 @@ class FloatGrid(Grid):
             cmap (str, optional): Colormap. Default keep original.
             title (str, optional): Title of dataset. Default '"DIG"'.
         """
-        right = kwargs.get("right", False)
         bins = np.histogram_bin_edges(
             self._values,
             bins=kwargs.get("bins", "auto"),
             range=kwargs.get("range", None),
         )
-        data = np.digitize(self.data, bins, right=right)
+        data = np.digitize(self.data, bins)
+        data[data == data.max()] = data.max() - 1
         kwargs["title"] = kwargs.get("title", f"DIG({self.title})")
-        return self.clone(
-            np.ma.masked_array(
-                data,
-                mask=self.data.mask,
-                fill_value=self.data.fill_value,
-            ),
-            astype=IntGrid,
-            **kwargs,
-        )
+        kwargs["cmap"] = kwargs.get("cmap", "viridis")
+        return self.clone(data, astype=IntGrid, **kwargs)
 
     def resample(self, scale, **kwargs):
         """Returns resampled dataset
@@ -699,11 +695,7 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dx({self.title})")
-        return self.clone(
-            self._dx,
-            astype=FloatGrid,
-            **kwargs,
-        )
+        return self.clone(self._dx, astype=FloatGrid, **kwargs)
 
     def dy(self, **kwargs):
         """Returns horizontal derivative dy
@@ -716,11 +708,7 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dy({self.title})")
-        return self.clone(
-            self._dy,
-            astype=FloatGrid,
-            **kwargs,
-        )
+        return self.clone(self._dy, astype=FloatGrid, **kwargs)
 
     def dz(self, **kwargs):
         """Returns vertical derivative dz
@@ -734,9 +722,7 @@ class FloatGrid(Grid):
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dz({self.title})")
         return self.clone(
-            np.ma.masked_array(self._dz, mask=self._dx.mask | self._dy.mask),
-            astype=FloatGrid,
-            **kwargs,
+            self._dz, mask=self._dx.mask | self._dy.mask, astype=FloatGrid, **kwargs
         )
 
     def upcont(self, h, **kwargs):
@@ -754,9 +740,7 @@ class FloatGrid(Grid):
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"up({self.title})")
         return self.clone(
-            np.ma.masked_array(up, mask=self._dx.mask | self._dy.mask),
-            astype=FloatGrid,
-            **kwargs,
+            up, mask=self._dx.mask | self._dy.mask, astype=FloatGrid, **kwargs
         )
 
     def thd(self, **kwargs):
@@ -770,11 +754,8 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"THD({self.title})")
-        return self.clone(
-            self._thd,
-            astype=FloatGrid,
-            **kwargs,
-        )
+        thd = np.sqrt(self._dx**2 + self._dy**2)
+        return self.clone(thd, astype=FloatGrid, **kwargs)
 
     def tga(self, **kwargs):
         """Returns total gradient amplitude (also called the analytic signal)
@@ -787,11 +768,8 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"TGA({self.title})")
-        return self.clone(
-            self._tga,
-            astype=FloatGrid,
-            **kwargs,
-        )
+        tga = np.sqrt(self._dx**2 + self._dy**2 + self._dz**2)
+        return self.clone(tga, astype=FloatGrid, **kwargs)
 
     def theta(self, **kwargs):
         """Returns theta - total horizontal derivative divided by the analytical signal
@@ -804,11 +782,9 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"Theta({self.title})")
-        return self.clone(
-            self._thd / self._tga,
-            astype=FloatGrid,
-            **kwargs,
-        )
+        thd = np.sqrt(self._dx**2 + self._dy**2)
+        tga = np.sqrt(self._dx**2 + self._dy**2 + self._dz**2)
+        return self.clone(thd / tga, astype=FloatGrid, **kwargs)
 
     def nthd(self, **kwargs):
         """Returns normalized total horizontal derivative
@@ -821,8 +797,9 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"NTHD({self.title})")
+        thd = np.sqrt(self._dx**2 + self._dy**2)
         return self.clone(
-            np.real(np.arctan2(self._thd, np.absolute(self._dz))),
+            np.real(np.arctan2(thd, np.absolute(self._dz))),
             astype=FloatGrid,
             **kwargs,
         )
@@ -838,11 +815,8 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"Tilt({self.title})")
-        return self.clone(
-            np.arctan2(self._dz, self._thd),
-            astype=FloatGrid,
-            **kwargs,
-        )
+        thd = np.sqrt(self._dx**2 + self._dy**2)
+        return self.clone(np.arctan2(self._dz, thd), astype=FloatGrid, **kwargs)
 
     def gaussian_filter(self, **kwargs):
         """Returns Gaussian filtered dataset
@@ -857,14 +831,7 @@ class FloatGrid(Grid):
         sigma = kwargs.get("sigma", 1)
         filtered = gaussian_filter(self.data.filled(np.nan), sigma)
         kwargs["title"] = kwargs.get("title", f"G({self.title}, {sigma})")
-        return self.clone(
-            np.ma.masked_array(
-                filtered,
-                mask=np.isnan(filtered) | self.data.mask,
-                fill_value=self.data.fill_value,
-            ),
-            **kwargs,
-        )
+        return self.clone(filtered, **kwargs)
 
     def median_filter(self, **kwargs):
         """Returns median filtered dataset
@@ -880,14 +847,7 @@ class FloatGrid(Grid):
         size = kwargs.get("size", 3)
         filtered = median_filter(self.data.filled(np.nan), size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
-        return self.clone(
-            np.ma.masked_array(
-                filtered,
-                mask=np.isnan(filtered) | self.data.mask,
-                fill_value=self.data.fill_value,
-            ),
-            **kwargs,
-        )
+        return self.clone(filtered, mask=np.isnan(filtered) | self.data.mask, **kwargs)
 
     def overlay(self, over, invert=False):
         """Create RGBimage of overlied datasets in HSV space
@@ -1078,13 +1038,7 @@ class DEMGrid(FloatGrid):
         kwargs["cmap"] = kwargs.get("cmap", "seismic")
         kwargs["title"] = kwargs.get("title", f"TPI({self.title})")
         return self.clone(
-            np.ma.masked_array(
-                tpi,
-                mask=np.isnan(tpi) | self.data.mask,
-                fill_value=self.data.fill_value,
-            ),
-            astype=FloatGrid,
-            **kwargs,
+            tpi, mask=np.isnan(tpi) | self.data.mask, astype=FloatGrid, **kwargs
         )
 
 

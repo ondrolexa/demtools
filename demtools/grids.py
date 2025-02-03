@@ -364,7 +364,8 @@ class Grid:
         if 0 in np.setdiff1d(index, agg_index):
             index = np.delete(index, 0)
         # aggregate
-        match kwargs.get("method", "mean"):
+        method = kwargs.get("method", "mean")
+        match method:
             case "maximum":
                 agg = ndimage.maximum(self._array, labels=labels, index=index)
             case "mean":
@@ -382,7 +383,7 @@ class Grid:
                     self._array, labels=labels, index=index
                 )
             case _:
-                raise ValueError(f"Method {kwargs.get("method")} is not available")
+                raise ValueError(f"Method {method} is not available")
         # reconstruct
         _, bix = np.unique(agg_index, return_inverse=True)
         res = agg[bix]

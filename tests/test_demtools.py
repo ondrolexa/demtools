@@ -21,3 +21,11 @@ def test_digitize(dem):
 def test_normalization(dem):
     g = dem.normalized()
     assert (g.min == pytest.approx(0)) & (g.max == pytest.approx(1))
+
+
+def test_boolean_select(dem):
+    assert dem[(dem >= 510) & (dem <= 515)].mean == pytest.approx(512.7716484527895)
+
+
+def test_over_aggregate(dem):
+    assert dem.aggregate(max(dem.shape)).mean == pytest.approx(dem.mean)

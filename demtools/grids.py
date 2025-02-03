@@ -11,10 +11,11 @@ import rasterio as rio
 import rasterio.crs as riocrs
 import rasterio.plot as rioplot
 import rasterio.sample as riosample
+from _pytest.main import Session
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
-from scipy.ndimage import convolve, gaussian_filter, generic_filter, median_filter
+from scipy import ndimage
 
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
@@ -62,8 +63,7 @@ class Grid:
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__} {self.title} "
-            + f"[{self.meta['height']},{self.meta['width']}] "
+            f"{self.__class__.__name__} {self.title} {self.shape} "
             + f"masked:{self._mask.sum()} EPSG:{self.meta['crs'].to_epsg()}"
         )
 
@@ -75,10 +75,14 @@ class Grid:
     def _mask(self):
         return ma.getmask(self.data)
 
+    @property
+    def shape(self):
+        return self.data.shape
+
     def __getitem__(self, mask):
         data = self.data.copy()
         if isinstance(mask, BoolGrid):
-            data[~mask._mask] = ma.masked
+            data[~mask._array] = ma.masked
         else:
             data[~mask] = ma.masked
         return self.clone(data)
@@ -247,12 +251,12 @@ class Grid:
         typObj = kwargs.pop("astype", type(self))
         return typObj(
             data,
-            mask=self._mask,
+            mask=kwargs.get("mask", None),
             cmap=kwargs.get("cmap", self.cmap),
             # stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", self.title),
             figsize=kwargs.get("figsize", self.figsize),
-            **self.meta,
+            **kwargs.get("meta", self.meta),
         )
 
     @contextmanager
@@ -307,13 +311,91 @@ class Grid:
             win = np.ones((2 * r + 1, 2 * r + 1))
         if kwargs.get("exclude_centre", False):
             win[win.shape[0] // 2, win.shape[1] // 2] = 0
-        n_sum = convolve(self.data.filled(0), win, mode="constant")
+        n_sum = ndimage.convolve(self.data.filled(0), win, mode="constant")
         # do not count mask
         c_grid = np.ones(self.data.shape, dtype=int)
         c_grid[self._mask] = 0
-        n_count = convolve(c_grid, win, mode="constant")
+        n_count = ndimage.convolve(c_grid, win, mode="constant")
         n_sum[self._mask] = np.nan
         return n_sum, n_count
+
+    def aggregate(self, size, **kwargs):
+        """Create aggregate dataset from squared blocks
+
+        Args:
+            size(int): Size of blocks.
+            method (str): Aggregation function. One of `"maximum"`, `"mean"`,
+                `"median"`, `"minimum"`, `"standard_deviation"`, `"variance"`.
+                Default is `"mean"`.
+
+        """
+        # align blocks
+        h, w = self.shape
+        nh = max(h // size, 1)
+        hpad = (max(h - nh * size, 0)) // 2
+        nw = max(w // size, 1)
+        wpad = (max(w - nw * size, 0)) // 2
+        # create block
+        blocks = []
+        new_layout = []
+        n = 0
+        for r in range(nh):
+            row = []
+            new_row = []
+            for c in range(nw):
+                n += 1
+                row.append(n * np.ones((size, size), dtype=int))
+                new_row.append(n)
+            blocks.append(row)
+            new_layout.append(new_row)
+        # create labels
+        labels = np.zeros(self.shape, dtype=int)
+        mxh, mxw = self.shape
+        labels[hpad : hpad + nh * size, wpad : wpad + nw * size] = np.block(blocks)[
+            hpad : min(hpad + nh * size, mxh), wpad : min(wpad + nw * size, mxw)
+        ]
+        labels[self._mask] = 0
+        # remove mask and padding
+        index = np.unique(labels)
+        agg_index = np.array(new_layout)
+        miss = np.setdiff1d(agg_index, index)
+        agg_index[np.isin(agg_index, miss)] = 0
+        # if only padding, skip it
+        if 0 in np.setdiff1d(index, agg_index):
+            index = np.delete(index, 0)
+        # aggregate
+        match kwargs.get("method", "mean"):
+            case "maximum":
+                agg = ndimage.maximum(self._array, labels=labels, index=index)
+            case "mean":
+                agg = ndimage.mean(self._array, labels=labels, index=index)
+            case "median":
+                agg = ndimage.median(self._array, labels=labels, index=index)
+            case "minimum":
+                agg = ndimage.minimum(self._array, labels=labels, index=index)
+            case "standard_deviation":
+                agg = ndimage.standard_deviation(
+                    self._array, labels=labels, index=index
+                )
+            case "variance":
+                agg = ndimage.standard_deviation(
+                    self._array, labels=labels, index=index
+                )
+            case _:
+                raise ValueError(f"Method {kwargs.get("method")} is not available")
+        # reconstruct
+        _, bix = np.unique(agg_index, return_inverse=True)
+        res = agg[bix]
+        res[agg_index == 0] = np.nan
+        # update metadata
+        meta = self.meta.copy()
+        meta["height"] = nh
+        meta["width"] = nw
+        t = self.meta["transform"]
+        meta["transform"] = Affine(
+            t.a * size, t.b, t.c + t.a * wpad, t.d, t.e * size, t.f + t.e * hpad
+        )
+        return self.clone(res, meta=meta, **kwargs)
 
     def sample(self, pts):
         """Returns array of values for sample points
@@ -524,8 +606,9 @@ class IntGrid(Grid):
         """Returns Majority filtered dataset
 
         Args:
-            size(int): A scalar or a list of length 2, giving the size
-                of the median filter window. Default 3
+            size(int): size gives the shape that is taken from the input array,
+                at every element position, to define the input to the filter
+                function. Default 3
             cmap (str, optional): Colormap. Default keep original.
             stretch (bool, optional): Stretch colormap. Default keep original.
             title (str, optional): Title of dataset. Default '"M(...)"'.
@@ -538,7 +621,7 @@ class IntGrid(Grid):
             return Counter(a).most_common(1)[0][0].item()
 
         size = kwargs.get("size", 3)
-        filtered = generic_filter(self.data.filled(), most_common, size)
+        filtered = ndimage.generic_filter(self.data.filled(), most_common, size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
         return self.clone(filtered, **kwargs)
 
@@ -573,6 +656,18 @@ class FloatGrid(Grid):
         self.cmap = kwargs.get("cmap", "viridis")
         self.title = kwargs.get("title", "FloatGrid")
 
+    @property
+    def min(self):
+        return self._values.min().item()
+
+    @property
+    def max(self):
+        return self._values.max().item()
+
+    @property
+    def mean(self):
+        return self._values.mean().item()
+
     @cached_property
     def _dx(self):
         """Horizontal derivative dx as numpy array"""
@@ -586,26 +681,20 @@ class FloatGrid(Grid):
     @cached_property
     def _dz(self):
         """Vertical derivative dz as numpy array"""
-        return derivz(
+        dz = derivz(
             self.data.filled(
                 self._values.mean()
             ),  # fix with implement fillna extrapolation
             self.meta["transform"].a,
             self.meta["transform"].e,
         )
+        dz[np.isnan(self._dx) | np.isnan(self._dy)] = np.nan
+        return dz
 
     @property
     def _tga(self):
         """Total gradient amplitude as numpy array"""
         return np.sqrt(self._dx**2 + self._dy**2 + self._dz**2)
-
-    @property
-    def min(self):
-        return self._values.min().item()
-
-    @property
-    def max(self):
-        return self._values.max().item()
 
     def normalized(self, **kwargs):
         """Returns normalized dataset to range (0,1)
@@ -670,19 +759,20 @@ class FloatGrid(Grid):
         data[data == data.max()] = data.max() - 1
         kwargs["title"] = kwargs.get("title", f"DIG({self.title})")
         kwargs["cmap"] = kwargs.get("cmap", "viridis")
-        return self.clone(data, astype=IntGrid, **kwargs)
+        return self.clone(data, mask=self._mask, astype=IntGrid, **kwargs)
 
     def resample(self, scale, **kwargs):
-        """Returns resampled dataset
+        """Returns bilinearly resampled dataset
 
         Args:
-            scale (float): Resampling scale.
+            scale (float): Resampling scale. New resolution is scale multiple
+                of original resolution
 
         """
         t = self.meta["transform"]
-        transform = Affine(t.a / scale, t.b, t.c, t.d, t.e / scale, t.f)
-        height = int(self.meta["height"] * scale)
-        width = int(self.meta["width"] * scale)
+        transform = Affine(t.a * scale, t.b, t.c, t.d, t.e * scale, t.f)
+        height = int(self.meta["height"] / scale)
+        width = int(self.meta["width"] / scale)
         meta = self.meta.copy()
         meta.update(transform=transform, height=height, width=width)
         with self.asdataset() as src:
@@ -692,7 +782,7 @@ class FloatGrid(Grid):
                 resampling=Resampling.bilinear,
                 masked=True,
             )
-        return self.clone(data, **kwargs, **meta)
+        return self.clone(data, meta=meta, **kwargs)
 
     def dx(self, **kwargs):
         """Returns horizontal derivative dx
@@ -731,9 +821,7 @@ class FloatGrid(Grid):
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dz({self.title})")
-        return self.clone(
-            self._dz, mask=self._dx.mask | self._dy.mask, astype=FloatGrid, **kwargs
-        )
+        return self.clone(self._dz, astype=FloatGrid, **kwargs)
 
     def upcont(self, h, **kwargs):
         """Returns upward continuation
@@ -747,11 +835,10 @@ class FloatGrid(Grid):
         up = upcontinue(
             self.data, self.meta["transform"].a, self.meta["transform"].e, h
         )
+        up[np.isnan(self._dx) | np.isnan(self._dy)] = np.nan
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"up({self.title})")
-        return self.clone(
-            up, mask=self._dx.mask | self._dy.mask, astype=FloatGrid, **kwargs
-        )
+        return self.clone(up, astype=FloatGrid, **kwargs)
 
     def thd(self, **kwargs):
         """Returns total horizontal derivative
@@ -839,7 +926,7 @@ class FloatGrid(Grid):
 
         """
         sigma = kwargs.get("sigma", 1)
-        filtered = gaussian_filter(self.data.filled(np.nan), sigma)
+        filtered = ndimage.gaussian_filter(self.data.filled(np.nan), sigma)
         kwargs["title"] = kwargs.get("title", f"G({self.title}, {sigma})")
         return self.clone(filtered, **kwargs)
 
@@ -855,7 +942,7 @@ class FloatGrid(Grid):
 
         """
         size = kwargs.get("size", 3)
-        filtered = median_filter(self.data.filled(np.nan), size)
+        filtered = ndimage.median_filter(self.data.filled(np.nan), size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
         return self.clone(filtered, mask=np.isnan(filtered) | self._mask, **kwargs)
 

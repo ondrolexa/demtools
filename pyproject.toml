@@ -1,3 +1,10 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project]
 name = "demtools"
 version = "0.1.0"
@@ -34,11 +41,6 @@ docs = [
     "sphinx_rtd_theme",
 ]
 dev = ["demtools[extra,tests,docs]", "black"]
-
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
 
 [tool.black]
 line-length = 88

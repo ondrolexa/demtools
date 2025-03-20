@@ -739,6 +739,48 @@ class FloatGrid(Grid):
         n_sum, n_count = self._kernel(**kwargs)
         return self.clone(n_sum / n_count, **kwargs)
 
+    def correlation(self, filter, **kwargs):
+        """Return the correlation between grid and filter"""
+        assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
+            1,
+            1,
+        ), "Sizes of filter must be odd"
+        d = self.data.filled(np.nan)
+        pad = max(filter.shape) // 2
+        dr, dc = d.shape
+        padded = np.pad(d, pad, constant_values=np.nan)
+        calc = np.nan_to_num(padded)
+        res = np.zeros_like(d)
+        counts = np.zeros_like(d, dtype=int)
+        for (fr, fc), w in np.ndenumerate(filter):
+            res += calc[fr : fr + dr, fc : fc + dc] * w
+            counts += 1 - np.isnan(padded[fr : fr + dr, fc : fc + dc]).astype(int)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            res /= counts
+        return self.clone(res, **kwargs)
+
+    def similarity(self, filter, **kwargs):
+        """Return the similarity between grid and filter"""
+        assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
+            1,
+            1,
+        ), "Sizes of filter must be odd"
+        d = self.data.filled(np.nan)
+        pad = max(filter.shape) // 2
+        dr, dc = d.shape
+        padded = np.pad(d, pad, constant_values=np.nan)
+        calc = np.nan_to_num(padded)
+        res = np.zeros_like(d)
+        counts = np.zeros_like(d, dtype=int)
+        for (fr, fc), w in np.ndenumerate(filter):
+            res += (w - calc[fr : fr + dr, fc : fc + dc]) ** 2
+            counts += 1 - np.isnan(padded[fr : fr + dr, fc : fc + dc]).astype(int)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            res /= counts
+        return self.clone(res, **kwargs)
+
     def digitize(self, **kwargs):
         """Return the IntGrid with indices of the bins to which each value belongs
 

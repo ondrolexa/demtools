@@ -27,6 +27,7 @@ dependencies = [
     "scipy",
     "rasterio",
     "affine",
+    "h5py",
     "geojson",
     "scikit-learn",
     "colorcet",

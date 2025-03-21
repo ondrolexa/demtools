@@ -5,6 +5,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"demtools.data" = ["*.tif"]
+
 [project]
 name = "demtools"
 version = "0.1.0"

@@ -11,7 +11,6 @@ import rasterio as rio
 import rasterio.crs as riocrs
 import rasterio.plot as rioplot
 import rasterio.sample as riosample
-from _pytest.main import Session
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
@@ -565,11 +564,11 @@ class IntGrid(Grid):
             IntGrid: example int grid
 
         """
-        datapath = importlib.resources.files("demtools") / "data"
+        datapath = importlib.resources.files("demtools.data")
         if test:
-            fname = datapath / "int.tif"
+            fname = datapath.joinpath("int.tif")
         else:
-            fname = datapath / "int.tif"
+            fname = datapath / "dem.tif"
         return cls.from_file(fname)
 
     @property

@@ -62,7 +62,7 @@ class Grid:
 
     def __repr__(self):
         return (
-            f"{self.__class__.__name__} {self.title} {self.shape} "
+            f"{self.__class__.__name__} {self.title} {self.shape} {self.resolution} "
             + f"masked:{self._mask.sum()} EPSG:{self.meta['crs'].to_epsg()}"
         )
 
@@ -77,6 +77,10 @@ class Grid:
     @property
     def shape(self):
         return self.data.shape
+
+    @property
+    def resolution(self):
+        return abs(self.meta["transform"].a), abs(self.meta["transform"].e)
 
     def __getitem__(self, mask):
         data = self.data.copy()
@@ -193,6 +197,20 @@ class Grid:
             self.data //= other
         return self
 
+    def __pow__(self, other):
+        if issubclass(type(other), Grid):
+            data = self.data**other.data
+        else:
+            data = self.data**other
+        return self.clone(data)
+
+    def __rpow__(self, other):
+        if issubclass(type(other), Grid):
+            data = other.data**self.data
+        else:
+            data = other**self.data
+        return self.clone(data)
+
     def __lt__(self, other):
         if issubclass(type(other), Grid):
             data = self.data < other.data
@@ -303,6 +321,18 @@ class Grid:
     def _values(self):
         return self.data.compressed()
 
+    def clip(self, r, h, c, w, **kwargs):
+        res = self.data[r : r + h, c : c + w]
+        # update metadata
+        meta = self.meta.copy()
+        meta["height"] = h
+        meta["width"] = w
+        t = self.meta["transform"]
+        meta["transform"] = Affine(
+            t.a, t.b, t.c + t.a * (c - 1), t.d, t.e, t.f + t.e * (r - 1)
+        )
+        return self.clone(res, meta=meta, **kwargs)
+
     def _kernel(self, **kwargs):
         win = kwargs.get("win", None)
         if win is None:
@@ -317,6 +347,52 @@ class Grid:
         n_count = ndimage.convolve(c_grid, win, mode="constant")
         n_sum[self._mask] = np.nan
         return n_sum, n_count
+
+    def correlation(self, filter, **kwargs):
+        """Return the correlation between grid and filter"""
+        assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
+            1,
+            1,
+        ), "Sizes of filter must be odd"
+        d = self.data.filled(np.nan)
+        pad = max(filter.shape) // 2
+        dr, dc = d.shape
+        padded = np.pad(d, pad, constant_values=np.nan)
+        calc = np.nan_to_num(padded)
+        res = np.zeros_like(d)
+        counts = np.zeros_like(d, dtype=int)
+        for (fr, fc), w in np.ndenumerate(filter):
+            res += calc[fr : fr + dr, fc : fc + dc] * w
+            counts += 1 - np.isnan(padded[fr : fr + dr, fc : fc + dc]).astype(int)
+
+        # only full
+        counts[counts < filter.size] = 0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            res /= counts
+        return self.clone(res, **kwargs)
+
+    def similarity(self, filter, **kwargs):
+        """Return the similarity between grid and filter"""
+        assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
+            1,
+            1,
+        ), "Sizes of filter must be odd"
+        d = self.data.filled(np.nan)
+        pad = max(filter.shape) // 2
+        dr, dc = d.shape
+        padded = np.pad(d, pad, constant_values=np.nan)
+        calc = np.nan_to_num(padded)
+        res = np.zeros_like(d)
+        counts = np.zeros_like(d, dtype=int)
+        for (fr, fc), w in np.ndenumerate(filter):
+            res += (w - calc[fr : fr + dr, fc : fc + dc]) ** 2
+            counts += 1 - np.isnan(padded[fr : fr + dr, fc : fc + dc]).astype(int)
+
+        # only full
+        counts[counts < filter.size] = 0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            res /= counts
+        return self.clone(res, **kwargs)
 
     def aggregate(self, size, **kwargs):
         """Create aggregate dataset from squared blocks
@@ -737,48 +813,6 @@ class FloatGrid(Grid):
         """
         n_sum, n_count = self._kernel(**kwargs)
         return self.clone(n_sum / n_count, **kwargs)
-
-    def correlation(self, filter, **kwargs):
-        """Return the correlation between grid and filter"""
-        assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
-            1,
-            1,
-        ), "Sizes of filter must be odd"
-        d = self.data.filled(np.nan)
-        pad = max(filter.shape) // 2
-        dr, dc = d.shape
-        padded = np.pad(d, pad, constant_values=np.nan)
-        calc = np.nan_to_num(padded)
-        res = np.zeros_like(d)
-        counts = np.zeros_like(d, dtype=int)
-        for (fr, fc), w in np.ndenumerate(filter):
-            res += calc[fr : fr + dr, fc : fc + dc] * w
-            counts += 1 - np.isnan(padded[fr : fr + dr, fc : fc + dc]).astype(int)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            res /= counts
-        return self.clone(res, **kwargs)
-
-    def similarity(self, filter, **kwargs):
-        """Return the similarity between grid and filter"""
-        assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
-            1,
-            1,
-        ), "Sizes of filter must be odd"
-        d = self.data.filled(np.nan)
-        pad = max(filter.shape) // 2
-        dr, dc = d.shape
-        padded = np.pad(d, pad, constant_values=np.nan)
-        calc = np.nan_to_num(padded)
-        res = np.zeros_like(d)
-        counts = np.zeros_like(d, dtype=int)
-        for (fr, fc), w in np.ndenumerate(filter):
-            res += (w - calc[fr : fr + dr, fc : fc + dc]) ** 2
-            counts += 1 - np.isnan(padded[fr : fr + dr, fc : fc + dc]).astype(int)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            res /= counts
-        return self.clone(res, **kwargs)
 
     def digitize(self, **kwargs):
         """Return the IntGrid with indices of the bins to which each value belongs

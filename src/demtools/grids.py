@@ -253,6 +253,10 @@ class Grid:
             data = self.data >= other
         return self.clone(data, cmap="binary", astype=BoolGrid)
 
+    def copy(self, **kwargs):
+        typObj = kwargs.get("astype", type(self))
+        return self.clone(self.data.astype(typObj.dtype).copy(), **kwargs)
+
     def clone(self, data, **kwargs):
         """Clone grid with new data
 
@@ -347,6 +351,11 @@ class Grid:
         n_count = ndimage.convolve(c_grid, win, mode="constant")
         n_sum[self._mask] = np.nan
         return n_sum, n_count
+
+    def generic_filter(self, func, size, **kwargs):
+        d = self.data.filled(self.fill_value)
+        res = ndimage.generic_filter(d, func, size=size)
+        return self.clone(res, **kwargs)
 
     def correlation(self, filter, **kwargs):
         """Return the correlation between grid and filter"""
@@ -557,6 +566,7 @@ class BoolGrid(Grid):
         super().__init__(data, **kwargs)
         self.cmap = kwargs.get("cmap", "binary")
         self.title = kwargs.get("title", "Bool")
+        self.fill_value = False
 
     def __and__(self, other):
         if isinstance(other, BoolGrid):
@@ -610,6 +620,7 @@ class IntGrid(Grid):
         super().__init__(data, **kwargs)
         self.cmap = kwargs.get("cmap", "viridis")
         self.title = kwargs.get("title", "IntGrid")
+        self.fill_value = -9999
 
     def __truediv__(self, other):
         if isinstance(other, DEMGrid):
@@ -731,6 +742,7 @@ class FloatGrid(Grid):
         self.stretch = kwargs.get("stretch", True)
         self.cmap = kwargs.get("cmap", "viridis")
         self.title = kwargs.get("title", "FloatGrid")
+        self.fill_value = np.nan
 
     @property
     def min(self):
@@ -801,11 +813,6 @@ class FloatGrid(Grid):
         return self.clone(
             self.data.max() - self.data + self.data.min(), astype=FloatGrid, **kwargs
         )
-
-    def generic_filter(self, func, size, **kwargs):
-        d = self.data.filled(np.nan)
-        res = ndimage.generic_filter(d, func, size=size)
-        return self.clone(res, **kwargs)
 
     def moving_average(self, **kwargs):
         """Returns moving window average
@@ -1231,6 +1238,31 @@ class DEMGrid(FloatGrid):
         return self.clone(
             tpi, mask=np.isnan(tpi) | self._mask, astype=FloatGrid, **kwargs
         )
+
+    def pits(self, size=3, **kwargs):
+        win = np.ones((size, size))
+        # win[size // 2, size // 2] = 0
+        win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
+        d = self.data.filled(self.fill_value)
+        res = ndimage.minimum_filter(d, footprint=win, mode="mirror") > d
+        return self.clone(res, astype=BoolGrid, **kwargs)
+
+    def flats(self, size=3, **kwargs):
+        win = np.ones((size, size))
+        # win[size // 2, size // 2] = 0
+        win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
+        d = self.data.filled(self.fill_value)
+        res = ndimage.minimum_filter(d, footprint=win, mode="mirror") == d
+        return self.clone(res, astype=BoolGrid, **kwargs)
+
+    def fill_pits(self, size=3, eps=0, **kwargs):
+        win = np.ones((size, size))
+        # win[size // 2, size // 2] = 0
+        win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
+        d = self.data.filled(self.fill_value).copy()
+        fill = ndimage.minimum_filter(d, footprint=win, mode="mirror")
+        d[fill > d] = fill[fill > d] + eps
+        return self.clone(d, **kwargs)
 
 
 class RGBimage:

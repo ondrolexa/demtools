@@ -802,6 +802,11 @@ class FloatGrid(Grid):
             self.data.max() - self.data + self.data.min(), astype=FloatGrid, **kwargs
         )
 
+    def generic_filter(self, func, size, **kwargs):
+        d = self.data.filled(np.nan)
+        res = ndimage.generic_filter(d, func, size=size)
+        return self.clone(res, **kwargs)
+
     def moving_average(self, **kwargs):
         """Returns moving window average
 
@@ -837,14 +842,27 @@ class FloatGrid(Grid):
         kwargs["cmap"] = kwargs.get("cmap", "viridis")
         return self.clone(data, mask=self._mask, astype=IntGrid, **kwargs)
 
-    def resample(self, scale, **kwargs):
-        """Returns bilinearly resampled dataset
+    def resample(self, scale, resampling="average", **kwargs):
+        """Returns resampled dataset
 
         Args:
             scale (float): Resampling scale. New resolution is scale multiple
                 of original resolution
+            resampling (str, optional): Resampling algorithm. One of 'nearest',
+                'bilinear', 'cubic', 'cubic_spline', 'lanczos', 'average',
+                'mode', and 'gauss'. Default 'average'.
 
         """
+        algs = {
+            "nearest": Resampling.nearest,
+            "bilinear": Resampling.bilinear,
+            "cubic": Resampling.cubic,
+            "cubic_spline": Resampling.cubic_spline,
+            "lanczos": Resampling.lanczos,
+            "average": Resampling.average,
+            "mode": Resampling.mode,
+            "gauss": Resampling.gauss,
+        }
         t = self.meta["transform"]
         transform = Affine(t.a * scale, t.b, t.c, t.d, t.e * scale, t.f)
         height = int(self.meta["height"] / scale)
@@ -855,7 +873,7 @@ class FloatGrid(Grid):
             data = src.read(
                 1,
                 out_shape=(height, width),
-                resampling=Resampling.bilinear,
+                resampling=algs[resampling],
                 masked=True,
             )
         return self.clone(data, meta=meta, **kwargs)

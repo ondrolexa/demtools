@@ -17,7 +17,7 @@ import shapely.geometry as shapelygeom
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
-from scipy import ndimage
+from scipy import ndimage, signal
 
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
@@ -279,11 +279,13 @@ class Grid:
         assert isinstance(data, np.ndarray), "Data must be the numpy.ndarray."
         typObj = kwargs.pop("astype", type(self))
         meta = kwargs.get("meta", self.meta).copy()
-        meta["dtype"] = kwargs.get("dtype", typObj.__dtype)
-        meta["nodata"] = kwargs.get("nodata", typObj.__fill_value)
+        meta["dtype"] = kwargs.get("dtype", self.meta["dtype"])
+        meta["nodata"] = kwargs.get("nodata", self.meta["nodata"])
         return typObj(
             data,
-            mask=kwargs.get("mask", None),
+            mask=kwargs.get(
+                "mask", self._mask if data.shape == self._mask.shape else None
+            ),
             cmap=kwargs.get("cmap", self.cmap),
             # stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", self.title),
@@ -354,7 +356,9 @@ class Grid:
         win = kwargs.get("win", None)
         if win is None:
             r = kwargs.get("r", 5)
-            win = np.ones((2 * r + 1, 2 * r + 1))
+            L = np.arange(-r, r + 1)
+            X, Y = np.meshgrid(L, L)
+            win = np.array((X**2 + Y**2) <= r**2, dtype=int)
         if kwargs.get("exclude_centre", False):
             win[win.shape[0] // 2, win.shape[1] // 2] = 0
         n_sum = ndimage.convolve(self.data.filled(0), win, mode="constant")
@@ -1299,14 +1303,48 @@ class DEMGrid(FloatGrid):
         """Calculate Topographic Position Index (TPI)
 
         Args:
-            win(numpy.array, optional): operation window. Default rectangle 2*r + 1
-            r(int, optional): radius of window. Default `5`
+            win(numpy.array, optional): structural element. Default disk
+            r(int, optional): radius of disk structural element. Default `5`
             cmap (str, optional): Colormap. Default `"seismic"`.
             stretch (bool, optional): Stretch colormap. Default `True`.
             title (str, optional): Title of dataset. Default '"TPI(...)"'.
 
         """
         n_sum, n_count = self._kernel(exclude_centre=True, **kwargs)
+        # this is TPI (spot height – average neighbourhood height)
+        tpi = self.filled - n_sum / n_count
+        kwargs["cmap"] = kwargs.get("cmap", "seismic")
+        kwargs["title"] = kwargs.get("title", f"TPI({self.title})")
+        return self.clone(
+            tpi, mask=np.isnan(tpi) | self._mask, astype=FloatGrid, **kwargs
+        )
+
+    def tpi_fft(self, **kwargs):
+        """Calculate Topographic Position Index (TPI) using FFT
+
+        Args:
+            win(numpy.array, optional): operation window. Default disk
+            r(int, optional): radius of disk structural element. Default `5`
+            cmap (str, optional): Colormap. Default `"seismic"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): Title of dataset. Default '"TPI(...)"'.
+
+        """
+        win = kwargs.get("win", None)
+        if win is None:
+            r = kwargs.get("r", 5)
+            L = np.arange(-r, r + 1)
+            X, Y = np.meshgrid(L, L)
+            win = np.array((X**2 + Y**2) <= r**2, dtype=int)
+        # ensure zero in centre
+        win[win.shape[0] // 2, win.shape[1] // 2] = 0
+        # count grid
+        c_grid = np.ones(self.data.shape)
+        c_grid[self._mask] = 0
+        # do fast convolution
+        n_sum = signal.convolve(self.data.filled(0), win, mode="same")
+        n_count = signal.convolve(c_grid, win, mode="same")
+        n_sum[self._mask] = np.nan
         # this is TPI (spot height – average neighbourhood height)
         tpi = self.filled - n_sum / n_count
         kwargs["cmap"] = kwargs.get("cmap", "seismic")

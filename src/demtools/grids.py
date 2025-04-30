@@ -3,14 +3,17 @@ from collections import Counter
 from contextlib import contextmanager
 from functools import cached_property
 
+import geojson
 import matplotlib.colors as clr
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.ma as ma
 import rasterio as rio
 import rasterio.crs as riocrs
+import rasterio.features as riofeatures
 import rasterio.plot as rioplot
 import rasterio.sample as riosample
+import shapely.geometry as shapelygeom
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
@@ -20,7 +23,8 @@ from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
 
 class Grid:
-    dtype = None
+    __dtype = None
+    __fill_value = None
 
     def __init__(self, data, **kwargs):
         self.cmap = kwargs.get("cmap", None)
@@ -28,9 +32,9 @@ class Grid:
         self.stretch = kwargs.get("stretch", False)
         self.figsize = kwargs.get("figsize", plt.rcParams["figure.figsize"])
         self.meta = {
-            "driver": "",
-            "dtype": "",
-            "nodata": 0,
+            "driver": "GTiff",
+            "dtype": np.dtype(self.__class__.__dtype),
+            "nodata": self.__class__.__fill_value,
             "width": 0,
             "height": 0,
             "count": 1,
@@ -43,7 +47,7 @@ class Grid:
         if not isinstance(data, ma.MaskedArray):
             data = ma.array(
                 data,
-                dtype=np.dtype(self.__class__.dtype),
+                dtype=self.meta["dtype"],
                 fill_value=self.meta["nodata"],
             )
         # fix invalid entries
@@ -91,7 +95,7 @@ class Grid:
         return self.clone(data)
 
     def __setitem__(self, mask, value):
-        value = np.array(value, np.dtype(self.__class__.dtype))
+        value = np.array(value, np.dtype(self.__class__.__dtype))
         if value.ndim > 0:
             value = value.flatten()[0]
         if isinstance(mask, BoolGrid):
@@ -216,46 +220,50 @@ class Grid:
             data = self.data < other.data
         else:
             data = self.data < other
-        return self.clone(data, cmap="binary", astype=BoolGrid)
+        return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __le__(self, other):
         if issubclass(type(other), Grid):
             data = self.data <= other.data
         else:
             data = self.data <= other
-        return self.clone(data, cmap="binary", astype=BoolGrid)
+        return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __eq__(self, other):
         if issubclass(type(other), Grid):
             data = self.data == other.data
         else:
             data = self.data == other
-        return self.clone(data, cmap="binary", astype=BoolGrid)
+        return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __ne__(self, other):
         if issubclass(type(other), Grid):
             data = self.data != other.data
         else:
             data = self.data != other
-        return self.clone(data, cmap="binary", astype=BoolGrid)
+        return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __gt__(self, other):
         if issubclass(type(other), Grid):
             data = self.data > other.data
         else:
             data = self.data > other
-        return self.clone(data, cmap="binary", astype=BoolGrid)
+        return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __ge__(self, other):
         if issubclass(type(other), Grid):
             data = self.data >= other.data
         else:
             data = self.data >= other
-        return self.clone(data, cmap="binary", astype=BoolGrid)
+        return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def copy(self, **kwargs):
-        typObj = kwargs.get("astype", type(self))
-        return self.clone(self.data.astype(typObj.dtype).copy(), **kwargs)
+        dtype = kwargs.pop("dtype", self.meta["dtype"])
+        return self.clone(self.data.astype(dtype).copy(), **kwargs)
+
+    @property
+    def filled(self):
+        return self.data.filled(self.meta["nodata"])
 
     def clone(self, data, **kwargs):
         """Clone grid with new data
@@ -270,6 +278,9 @@ class Grid:
         """
         assert isinstance(data, np.ndarray), "Data must be the numpy.ndarray."
         typObj = kwargs.pop("astype", type(self))
+        meta = kwargs.get("meta", self.meta).copy()
+        meta["dtype"] = kwargs.get("dtype", typObj.__dtype)
+        meta["nodata"] = kwargs.get("nodata", typObj.__fill_value)
         return typObj(
             data,
             mask=kwargs.get("mask", None),
@@ -277,7 +288,7 @@ class Grid:
             # stretch=kwargs.get("stretch", self.stretch),
             title=kwargs.get("title", self.title),
             figsize=kwargs.get("figsize", self.figsize),
-            **kwargs.get("meta", self.meta),
+            **meta,
         )
 
     @contextmanager
@@ -303,6 +314,8 @@ class Grid:
         with rio.open(filename) as src:
             data = src.read(band, masked=True)
             meta = src.meta
+            # meta["dtype"] = cls.__dtype
+            # meta["nodata"] = cls.__fill_value
         return cls(data, **kwargs, **meta)
 
     def write_tif(self, filename):
@@ -315,11 +328,11 @@ class Grid:
         if np.any(self._mask):
             with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
                 with rio.open(filename, "w", **self.meta) as dst:
-                    dst.write(self.data.filled(np.nan), 1)
+                    dst.write(self.filled, 1)
                     dst.write_mask((~self._mask * 255).astype("uint8"))
         else:
             with rio.open(filename, "w", **self.meta) as dst:
-                dst.write_band(1, self.data.filled())
+                dst.write_band(1, self.filled)
 
     @property
     def _values(self):
@@ -353,7 +366,7 @@ class Grid:
         return n_sum, n_count
 
     def generic_filter(self, func, size, **kwargs):
-        d = self.data.filled(self.fill_value)
+        d = self.filled
         res = ndimage.generic_filter(d, func, size=size)
         return self.clone(res, **kwargs)
 
@@ -363,7 +376,7 @@ class Grid:
             1,
             1,
         ), "Sizes of filter must be odd"
-        d = self.data.filled(np.nan)
+        d = self.filled
         pad = max(filter.shape) // 2
         dr, dc = d.shape
         padded = np.pad(d, pad, constant_values=np.nan)
@@ -386,7 +399,7 @@ class Grid:
             1,
             1,
         ), "Sizes of filter must be odd"
-        d = self.data.filled(np.nan)
+        d = self.filled
         pad = max(filter.shape) // 2
         dr, dc = d.shape
         padded = np.pad(d, pad, constant_values=np.nan)
@@ -560,13 +573,13 @@ class BoolGrid(Grid):
 
     """
 
-    dtype = "bool"
+    __dtype = "bool"
+    __fill_value = False
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
         self.cmap = kwargs.get("cmap", "binary")
         self.title = kwargs.get("title", "Bool")
-        self.fill_value = False
 
     def __and__(self, other):
         if isinstance(other, BoolGrid):
@@ -593,6 +606,27 @@ class BoolGrid(Grid):
     def count_false(self):
         return np.sum(~self._values).item()
 
+    def erosion(self):
+        return self.clone(ndimage.binary_erosion(self.filled))
+
+    def dilation(self):
+        return self.clone(ndimage.binary_dilation(self.filled))
+
+    def closing(self):
+        return self.clone(ndimage.binary_closing(self.filled))
+
+    def opening(self):
+        return self.clone(ndimage.binary_opening(self.filled))
+
+    def fill_holes(self):
+        return self.clone(ndimage.binary_fill_holes(self.filled))
+
+    def label(self, **kwargs):
+        labeled_array, num_features = ndimage.label(self.data.filled(False))
+        return self.clone(
+            labeled_array, astype=IntGrid, dtype="int32", nodata=0, **kwargs
+        )
+
 
 class IntGrid(Grid):
     """A class to store discrete data.
@@ -614,13 +648,13 @@ class IntGrid(Grid):
 
     """
 
-    dtype = "int"
+    __dtype = "int"
+    __fill_value = -9999
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
         self.cmap = kwargs.get("cmap", "viridis")
         self.title = kwargs.get("title", "IntGrid")
-        self.fill_value = -9999
 
     def __truediv__(self, other):
         if isinstance(other, DEMGrid):
@@ -708,9 +742,34 @@ class IntGrid(Grid):
             return Counter(a).most_common(1)[0][0].item()
 
         size = kwargs.get("size", 3)
-        filtered = ndimage.generic_filter(self.data.filled(), most_common, size)
+        filtered = ndimage.generic_filter(self.filled, most_common, size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
         return self.clone(filtered, **kwargs)
+
+    def polygonize(self, file=None):
+        source = self.clone(self.data.astype("int32"))
+        if file is not None:
+            features = []
+            for shape, val in riofeatures.shapes(
+                source.filled, transform=self.meta["transform"]
+            ):
+                if val != self.meta["nodata"]:
+                    feat = geojson.Feature(
+                        geometry=geojson.Polygon(shape["coordinates"]),
+                        properties={"value": val},
+                    )
+                    features.append(feat)
+            feature_collection = geojson.FeatureCollection(features)
+            with open(file, "w") as f:
+                geojson.dump(feature_collection, f)
+        else:
+            geoms = []
+            for shape, val in riofeatures.shapes(
+                source.filled, transform=self.meta["transform"]
+            ):
+                if val != self.meta["nodata"]:
+                    geoms.append(shapelygeom.shape(shape))
+            return geoms
 
 
 class FloatGrid(Grid):
@@ -735,14 +794,14 @@ class FloatGrid(Grid):
 
     """
 
-    dtype = "float"
+    __dtype = "float"
+    __fill_value = np.nan
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
         self.stretch = kwargs.get("stretch", True)
         self.cmap = kwargs.get("cmap", "viridis")
         self.title = kwargs.get("title", "FloatGrid")
-        self.fill_value = np.nan
 
     @property
     def min(self):
@@ -759,12 +818,12 @@ class FloatGrid(Grid):
     @cached_property
     def _dx(self):
         """Horizontal derivative dx as numpy array"""
-        return derivx(self.data.filled(np.nan), self.meta["transform"].a)
+        return derivx(self.filled, self.meta["transform"].a)
 
     @cached_property
     def _dy(self):
         """Horizontal derivative dy as numpy array"""
-        return derivy(self.data.filled(np.nan), self.meta["transform"].e)
+        return derivy(self.filled, self.meta["transform"].e)
 
     @cached_property
     def _dz(self):
@@ -1029,7 +1088,7 @@ class FloatGrid(Grid):
         sigma = kwargs.get("sigma", 1)
         filtered = ndimage.gaussian_filter(self.data.filled(np.nan), sigma)
         kwargs["title"] = kwargs.get("title", f"G({self.title}, {sigma})")
-        return self.clone(filtered, **kwargs)
+        return self.clone(filtered, mask=np.isnan(filtered) | self._mask, **kwargs)
 
     def median_filter(self, **kwargs):
         """Returns median filtered dataset
@@ -1148,6 +1207,23 @@ class DEMGrid(FloatGrid):
         self.title = kwargs.get("title", "DEM")
 
     @classmethod
+    def from_pysheds(cls, dem):
+        data = ma.array(
+            dem.data,
+            mask=np.array(dem.data) == dem.nodata,
+            fill_value=dem.nodata,
+        )
+        return cls(
+            data,
+            transform=dem.affine,
+            height=dem.shape[0],
+            width=dem.shape[1],
+            crs=dem.crs,
+            nodata=dem.nodata,
+            dtype=dem.dtype,
+        )
+
+    @classmethod
     def example(cls, test=False):
         """Get example dem data
 
@@ -1232,7 +1308,7 @@ class DEMGrid(FloatGrid):
         """
         n_sum, n_count = self._kernel(exclude_centre=True, **kwargs)
         # this is TPI (spot height – average neighbourhood height)
-        tpi = self.data.filled(np.nan) - n_sum / n_count
+        tpi = self.filled - n_sum / n_count
         kwargs["cmap"] = kwargs.get("cmap", "seismic")
         kwargs["title"] = kwargs.get("title", f"TPI({self.title})")
         return self.clone(
@@ -1241,17 +1317,29 @@ class DEMGrid(FloatGrid):
 
     def pits(self, size=3, **kwargs):
         win = np.ones((size, size))
-        # win[size // 2, size // 2] = 0
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
-        d = self.data.filled(self.fill_value)
+        d = self.filled
+        res = ndimage.minimum_filter(d, footprint=win, mode="mirror") > d
+        return self.clone(res, astype=BoolGrid, **kwargs)
+
+    def pits2(self, size=3, **kwargs):
+        win = np.ones((size, size))
+        win[size // 2, size // 2] = 0
+        d = self.filled
         res = ndimage.minimum_filter(d, footprint=win, mode="mirror") > d
         return self.clone(res, astype=BoolGrid, **kwargs)
 
     def flats(self, size=3, **kwargs):
         win = np.ones((size, size))
-        # win[size // 2, size // 2] = 0
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
-        d = self.data.filled(self.fill_value)
+        d = self.filled
+        res = ndimage.minimum_filter(d, footprint=win, mode="mirror") == d
+        return self.clone(res, astype=BoolGrid, **kwargs)
+
+    def flats2(self, size=3, **kwargs):
+        win = np.ones((size, size))
+        win[size // 2, size // 2] = 0
+        d = self.filled
         res = ndimage.minimum_filter(d, footprint=win, mode="mirror") == d
         return self.clone(res, astype=BoolGrid, **kwargs)
 
@@ -1259,10 +1347,18 @@ class DEMGrid(FloatGrid):
         win = np.ones((size, size))
         # win[size // 2, size // 2] = 0
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
-        d = self.data.filled(self.fill_value).copy()
+        d = self.filled.copy()
         fill = ndimage.minimum_filter(d, footprint=win, mode="mirror")
         d[fill > d] = fill[fill > d] + eps
         return self.clone(d, **kwargs)
+
+    def sink_points(self, size):
+        # locs = self.fill_pits(3).fill_pits(5).pits(7).fill_holes().opening().closing()
+        locs = self.pits2(size)  # .fill_holes().opening().closing()
+        labeled_array, num_features = ndimage.label(locs.filled)
+        return ndimage.minimum_position(
+            self.filled, labels=labeled_array, index=range(1, num_features + 1)
+        )
 
 
 class RGBimage:

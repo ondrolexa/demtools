@@ -627,17 +627,17 @@ class BoolGrid(Grid):
     def count_false(self):
         return np.sum(~self._values).item()
 
-    def erosion(self):
-        return self.clone(ndimage.binary_erosion(self.filled))
+    def erosion(self, n=1):
+        return self.clone(ndimage.binary_erosion(self.filled, iterations=n))
 
-    def dilation(self):
-        return self.clone(ndimage.binary_dilation(self.filled))
+    def dilation(self, n=1):
+        return self.clone(ndimage.binary_dilation(self.filled, iterations=n))
 
-    def closing(self):
-        return self.clone(ndimage.binary_closing(self.filled))
+    def closing(self, n=1):
+        return self.clone(ndimage.binary_closing(self.filled, iterations=n))
 
-    def opening(self):
-        return self.clone(ndimage.binary_opening(self.filled))
+    def opening(self, n=1):
+        return self.clone(ndimage.binary_opening(self.filled, iterations=n))
 
     def fill_holes(self):
         return self.clone(ndimage.binary_fill_holes(self.filled))

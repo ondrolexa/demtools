@@ -18,6 +18,9 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
 from scipy import ndimage, signal
+from scipy.cluster import hierarchy
+from sklearn.cluster import AgglomerativeClustering, KMeans
+from tqdm import tqdm
 
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
@@ -278,20 +281,34 @@ class Grid:
         """
         assert isinstance(data, np.ndarray), "Data must be the numpy.ndarray."
         typObj = kwargs.pop("astype", type(self))
+        only_valid = kwargs.pop("only_valid", False)
         meta = kwargs.get("meta", self.meta).copy()
         meta["dtype"] = kwargs.get("dtype", self.meta["dtype"])
         meta["nodata"] = kwargs.get("nodata", self.meta["nodata"])
-        return typObj(
-            data,
-            mask=kwargs.get(
-                "mask", self._mask if data.shape == self._mask.shape else None
-            ),
-            cmap=kwargs.get("cmap", self.cmap),
-            # stretch=kwargs.get("stretch", self.stretch),
-            title=kwargs.get("title", self.title),
-            figsize=kwargs.get("figsize", self.figsize),
-            **meta,
-        )
+        if only_valid:
+            full = meta["nodata"] * np.ones(self.shape, dtype=meta["dtype"])
+            full[~self._mask] = np.array(data, dtype=meta["dtype"])
+            return typObj(
+                full,
+                mask=self._mask,
+                cmap=kwargs.get("cmap", self.cmap),
+                # stretch=kwargs.get("stretch", self.stretch),
+                title=kwargs.get("title", self.title),
+                figsize=kwargs.get("figsize", self.figsize),
+                **meta,
+            )
+        else:
+            return typObj(
+                data,
+                mask=kwargs.get(
+                    "mask", self._mask if data.shape == self._mask.shape else None
+                ),
+                cmap=kwargs.get("cmap", self.cmap),
+                # stretch=kwargs.get("stretch", self.stretch),
+                title=kwargs.get("title", self.title),
+                figsize=kwargs.get("figsize", self.figsize),
+                **meta,
+            )
 
     @contextmanager
     def asdataset(self):
@@ -631,6 +648,23 @@ class BoolGrid(Grid):
             labeled_array, astype=IntGrid, dtype="int32", nodata=0, **kwargs
         )
 
+    def normalized(self, **kwargs):
+        """Returns normalized dataset to range (0,1)
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): Title of dataset. Default '"NORM(...)"'.
+
+        """
+        kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
+        return self.clone(
+            1 - self.data.astype(float),
+            astype=FloatGrid,
+            dtype=float,
+            **kwargs,
+        )
+
 
 class IntGrid(Grid):
     """A class to store discrete data.
@@ -749,6 +783,23 @@ class IntGrid(Grid):
         filtered = ndimage.generic_filter(self.filled, most_common, size)
         kwargs["title"] = kwargs.get("title", f"M({self.title}, {size})")
         return self.clone(filtered, **kwargs)
+
+    def normalized(self, **kwargs):
+        """Returns normalized dataset to range (0,1)
+
+        Args:
+            cmap (str, optional): Colormap. Default `"bone_r"`.
+            stretch (bool, optional): Stretch colormap. Default `True`.
+            title (str, optional): Title of dataset. Default '"NORM(...)"'.
+
+        """
+        kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
+        return self.clone(
+            (self.data - self.data.min()) / (self.data.max() - self.data.min()),
+            astype=FloatGrid,
+            dtype=float,
+            **kwargs,
+        )
 
     def polygonize(self, file=None):
         source = self.clone(self.data.astype("int32"))
@@ -1204,6 +1255,9 @@ class DEMGrid(FloatGrid):
 
     """
 
+    __dtype = "float"
+    __fill_value = np.nan
+
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
         self.stretch = kwargs.get("stretch", False)
@@ -1353,6 +1407,26 @@ class DEMGrid(FloatGrid):
             tpi, mask=np.isnan(tpi) | self._mask, astype=FloatGrid, **kwargs
         )
 
+    def tpi_cube(self, **kwargs):
+        n = kwargs.pop("n", 20)
+        scale = kwargs.pop("scale", 3.5)
+        steps = np.arange(0, (n - 1) * 2**scale + 1, 2**scale, dtype=int)
+        for r in tqdm(steps, desc="Calculating TPI"):
+            if r == 0:
+                cube = [np.zeros_like(self.filled, dtype=float)[~self._mask]]
+            else:
+                with np.errstate(divide="ignore"):
+                    L = np.arange(-r, r + 1)
+                    X, Y = np.meshgrid(L, L)
+                    win = np.array(1 / np.sqrt(X**2 + Y**2))
+                    win[(X**2 + Y**2) > r**2] = 0
+                tpi = self.tpi_fft(win=win).filled
+                cube.append(tpi[~self._mask])
+
+        return FeatureSet(
+            np.array(cube).T, self._mask, self.meta, feature_coords=steps, **kwargs
+        )
+
     def pits(self, size=3, **kwargs):
         win = np.ones((size, size))
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
@@ -1469,3 +1543,95 @@ class RGBimage:
             **kwargs,
         )
         plt.show()
+
+
+class FeatureSet:
+    """A class to store ML features.
+
+    Args:
+        data (numpy.array): data as 2d numpy array. Number of rows
+            corresponds to valid raster cells.
+        mask (numpy.array): boolean array mask
+        meta (dict): rasterio metadata
+    """
+
+    def __init__(self, data, mask, meta, **kwargs):
+        self.data = data
+        self._mask = mask
+        self.meta = meta.copy()
+        self.meta["dtype"] = "int32"
+        self.meta["nodata"] = -9999
+        self.clusters = None
+        self.centers = None
+        self.labels = None
+        self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
+        self.cluster(**kwargs)
+
+    def cluster(self, **kwargs):
+        print("Calculating initial clusters... ")
+        kmeans = KMeans(
+            n_clusters=kwargs.get("n_kmeans", 128),
+            random_state=kwargs.get("random_state", 42),
+            init=kwargs.get("init", "k-means++"),
+        )
+        self.clusters = kmeans.fit_predict(self.data)
+        self.centers = kmeans.cluster_centers_
+        self.aggclusters(**kwargs)
+        print("Done.")
+
+    def dendrogram(self, **kwargs):
+        Z = hierarchy.linkage(
+            self.centers,
+            metric=kwargs.get("metric", "euclidean"),
+            method=kwargs.get("linkage", "ward"),
+        )
+        hierarchy.dendrogram(Z)
+        plt.show()
+
+    def aggclusters(self, **kwargs):
+        hierarchical_cluster = AgglomerativeClustering(
+            n_clusters=kwargs.get("n_clusters", 7),
+            metric=kwargs.get("metric", "euclidean"),
+            linkage=kwargs.get("linkage", "ward"),
+        )
+        agg = hierarchical_cluster.fit_predict(self.centers)
+        self.labels = self.clusters.copy()
+        for ix in range(len(agg)):
+            self.labels[self.clusters == ix] = agg[ix]
+
+    def labels_average(self):
+        cids = np.unique(self.labels)
+        return np.array([self.data[self.labels == c, :].mean(axis=0) for c in cids])
+
+    def sort_label_integrals(self):
+        cids = np.unique(self.labels)
+        labels = self.labels.copy()
+        six = np.argsort(np.trapezoid(self.labels_average()))
+        for a, b in zip(cids, six):
+            labels[self.labels == b] = a
+        self.labels = labels
+
+    def plot_averages(self, clusters=False):
+        fig, ax = plt.subplots()
+        if clusters:
+            ax.plot(self.feature_coords, self.centers.T)
+            for c, y in enumerate(self.centers[:, -1]):
+                ax.text(self.feature_coords[-1], y, f"{c}", verticalalignment="center")
+        else:
+            cids = np.unique(self.labels)
+            cave = self.labels_average()
+            ax.plot(self.feature_coords, cave.T)
+            for c, y in zip(cids, cave[:, -1]):
+                ax.text(self.feature_coords[-1], y, f"{c}", verticalalignment="center")
+        plt.show()
+
+    def as_grid(self, clusters=False):
+        res = IntGrid(
+            self.meta["nodata"] * np.ones((self.meta["height"], self.meta["width"])),
+            mask=self._mask,
+            **self.meta,
+        )
+        if clusters:
+            return res.clone(self.clusters, only_valid=True)
+        else:
+            return res.clone(self.labels, only_valid=True)

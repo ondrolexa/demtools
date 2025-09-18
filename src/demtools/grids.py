@@ -627,20 +627,88 @@ class BoolGrid(Grid):
     def count_false(self):
         return np.sum(~self._values).item()
 
-    def erosion(self, n=1):
-        return self.clone(ndimage.binary_erosion(self.filled, iterations=n))
+    def erosion(self, **kwargs):
+        """Binary erosion of True regions
 
-    def dilation(self, n=1):
-        return self.clone(ndimage.binary_dilation(self.filled, iterations=n))
+        Args:
+            n(int, optional): Number of iterations. Default 1
 
-    def closing(self, n=1):
-        return self.clone(ndimage.binary_closing(self.filled, iterations=n))
+        """
+        n = kwargs.pop("n", 1)
+        return self.clone(ndimage.binary_erosion(self.filled, iterations=n), **kwargs)
 
-    def opening(self, n=1):
-        return self.clone(ndimage.binary_opening(self.filled, iterations=n))
+    def dilation(self, **kwargs):
+        """Binary dilation of True regions
 
-    def fill_holes(self):
-        return self.clone(ndimage.binary_fill_holes(self.filled))
+        Args:
+            n(int, optional): Number of iterations. Default 1
+
+        """
+        n = kwargs.pop("n", 1)
+        return self.clone(
+            ndimage.binary_dilation(self.filled, iterations=n),
+            **kwargs,
+        )
+
+    def closing(self, **kwargs):
+        """Binary closing of True regions
+
+        Args:
+            n(int, optional): Number of iterations. Default 1
+
+        """
+        n = kwargs.pop("n", 1)
+        return self.clone(ndimage.binary_closing(self.filled, iterations=n), **kwargs)
+
+    def opening(self, **kwargs):
+        """Binary opening of True regions
+
+        Args:
+            n(int, optional): Number of iterations. Default 1
+
+        """
+        n = kwargs.pop("n", 1)
+        return self.clone(ndimage.binary_opening(self.filled, iterations=n), **kwargs)
+
+    def fill_holes(self, **kwargs):
+        """Binary fill of False holes in True regions"""
+        return self.clone(ndimage.binary_fill_holes(self.filled), **kwargs)
+
+    def remove_dots(self, **kwargs):
+        """Remove True regions with size in pixels smaller or equal to given value
+
+        Args:
+            size(int, optional): Size in pixels of regions to remove. Default 1
+
+        """
+        labels, nb_labels = ndimage.label(self.filled)
+        sizes = np.bincount(labels.ravel())
+        mask_sizes = sizes > kwargs.pop("size", 1)
+        mask_sizes[0] = 0
+        return self.clone(mask_sizes[labels], **kwargs)
+
+    def clear_boundary(self, **kwargs):
+        """Remove True regions touching the boundary
+
+        Args:
+            use_mask(bool, optional): Also use mask boundary. Default True
+
+        """
+        if kwargs.pop("use_mask", True):
+            # mask boundary
+            bnd = ndimage.binary_dilation(self.data.mask) & ~self.data.mask
+        else:
+            bnd = np.zeros_like(self.filled)
+        # data boundary
+        bnd[:, [0, -1]] = True
+        bnd[[0, -1], :] = True
+        # apply mask
+        bnd[self.data.mask] = False
+        labels, nb_labels = ndimage.label(self.filled)
+        touch = np.unique(labels[bnd])
+        for lbl in touch:
+            labels[labels == lbl] = 0
+        return self.clone(labels > 1, **kwargs)
 
     def label(self, **kwargs):
         labeled_array, num_features = ndimage.label(self.data.filled(False))
@@ -748,6 +816,18 @@ class IntGrid(Grid):
             plt.show()
         else:
             return values, counts
+
+    def remove_dots(self, **kwargs):
+        """Remove regions with size in pixels smaller or equal to given value
+
+        Args:
+            size(int, optional): Size in pixels of regions to remove. Default 1
+
+        """
+        values, counts = self.counts()
+        counts[values[values == 0]] = 0
+        mask_sizes = counts > kwargs.pop("size", 1)
+        return self.clone(mask_sizes[self.data.filled()], **kwargs)
 
     def moving_average(self, **kwargs):
         """Returns moving window average

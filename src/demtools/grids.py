@@ -313,6 +313,36 @@ class Grid:
                 **meta,
             )
 
+    def asbool(self):
+        """Return grid as FloatGrid"""
+        return BoolGrid(
+            ma.array(
+                self.data,
+                dtype=FloatGrid.__dtype,
+                fill_value=FloatGrid.__fill_value,
+            ),
+            mask=self._mask if self.data.shape == self._mask.shape else None,
+            cmap=self.cmap,
+            title=self.title,
+            figsize=self.figsize,
+            **self.meta,
+        )
+
+    def asint(self):
+        """Return grid as FloatGrid"""
+        return IntGrid(
+            ma.array(
+                self.data,
+                dtype=FloatGrid.__dtype,
+                fill_value=FloatGrid.__fill_value,
+            ),
+            mask=self._mask if self.data.shape == self._mask.shape else None,
+            cmap=self.cmap,
+            title=self.title,
+            figsize=self.figsize,
+            **self.meta,
+        )
+
     def asfloat(self):
         """Return grid as FloatGrid"""
         return FloatGrid(
@@ -1297,6 +1327,7 @@ class FloatGrid(Grid):
         contour = kwargs.pop("contour", False)
         contour_label_kws = kwargs.pop("contour_label_kws", None)
         ax = kwargs.pop("ax", None)
+        show = kwargs.pop("show", True)
         title = kwargs.pop("title", self.title)
         transform = kwargs.pop("transform", self.meta["transform"])
         stretch = kwargs.pop("stretch", self.stretch)
@@ -1326,7 +1357,8 @@ class FloatGrid(Grid):
                 fig.colorbar(rioax.collections[0], cax=cax)  # type: ignore
             else:
                 fig.colorbar(rioax.images[0], cax=cax)  # type: ignore
-        plt.show()
+        if show:
+            plt.show()
 
 
 class DEMGrid(FloatGrid):
@@ -1631,6 +1663,7 @@ class RGBimage:
 
         """
         ax = kwargs.pop("ax", None)
+        show = kwargs.pop("show", True)
         title = kwargs.pop("title", self.title)
         transform = kwargs.pop("transform", self.meta["transform"])
         figsize = kwargs.pop("figsize", self.figsize)
@@ -1643,7 +1676,8 @@ class RGBimage:
             transform=transform,
             **kwargs,
         )
-        plt.show()
+        if show:
+            plt.show()
 
 
 class FeatureSet:

@@ -55,6 +55,9 @@ class Grid:
             )
         # fix invalid entries
         data = ma.fix_invalid(data)
+        # reshape if needed
+        if len(data.shape) == 1:
+            data = data.reshape((self.meta["height"], self.meta["width"]))
         # validate metadata
         assert data.shape == (
             self.meta["height"],

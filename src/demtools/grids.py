@@ -368,6 +368,22 @@ class Grid:
             with memfile.open() as dataset:  # Reopen as DatasetReader
                 yield dataset  # Note yield not return
 
+    def index(self, point, linear=False):
+        with self.asdataset() as src:
+            idx = src.index(*point)
+        try:
+            if not ma.is_masked(self.data[idx]):
+                if linear:
+                    full = np.zeros(self.shape, dtype=int)
+                    full[~self._mask] = np.arange((~self._mask).sum())
+                    return full[idx]
+                else:
+                    return idx
+            else:
+                return None
+        except IndexError:
+            return None
+
     @classmethod
     def from_file(cls, filename, **kwargs):
         """Read dataset from georeferenced file

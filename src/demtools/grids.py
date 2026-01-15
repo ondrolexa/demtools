@@ -606,6 +606,15 @@ class Grid:
         )
         return self.sample(pts)
 
+    def ginput(self, **kwargs):
+        n = kwargs.pop("n", 1)
+        figsize = kwargs.get("figsize", self.figsize)
+        fig, ax = plt.subplots(figsize=figsize)
+        kwargs["ax"] = ax
+        kwargs["show"] = False
+        self.show(**kwargs)
+        return plt.ginput(n)
+
     def show(self, **kwargs):
         """Show dataset
 

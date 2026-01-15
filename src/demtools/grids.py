@@ -569,6 +569,7 @@ class Grid:
 
         """
         ax = kwargs.pop("ax", None)
+        show = kwargs.pop("show", True)
         title = kwargs.pop("title", self.title)
         transform = kwargs.pop("transform", self.meta["transform"])
         figsize = kwargs.pop("figsize", self.figsize)
@@ -590,7 +591,8 @@ class Grid:
             divider = make_axes_locatable(ax)
             cax = divider.append_axes("right", size="5%", pad=0.05)
             fig.colorbar(rioax.images[0], cax=cax)  # type: ignore
-        plt.show()
+        if show:
+            plt.show()
 
 
 class BoolGrid(Grid):

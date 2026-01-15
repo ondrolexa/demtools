@@ -629,6 +629,7 @@ class Grid:
         transform = kwargs.pop("transform", self.meta["transform"])
         figsize = kwargs.pop("figsize", self.figsize)
         colorbar = kwargs.pop("colorbar", True)
+        adjust = kwargs.pop("adjust", False)
         if "cmap" not in kwargs:
             kwargs["cmap"] = self.cmap
         if ax is None:
@@ -640,6 +641,7 @@ class Grid:
             ax=ax,
             title=title,
             transform=transform,
+            adjust=adjust,
             **kwargs,
         )
         if colorbar:
@@ -1358,6 +1360,7 @@ class FloatGrid(Grid):
         stretch = kwargs.pop("stretch", self.stretch)
         figsize = kwargs.pop("figsize", self.figsize)
         colorbar = kwargs.pop("colorbar", True)
+        adjust = kwargs.pop("adjust", False)
         if "cmap" not in kwargs:
             kwargs["cmap"] = self.cmap
         if stretch:
@@ -1373,6 +1376,7 @@ class FloatGrid(Grid):
             ax=ax,
             title=title,
             transform=transform,
+            adjust=adjust,
             **kwargs,
         )
         if colorbar:

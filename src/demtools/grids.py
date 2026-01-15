@@ -313,6 +313,21 @@ class Grid:
                 **meta,
             )
 
+    def asfloat(self):
+        """Return grid as FloatGrid"""
+        return FloatGrid(
+            ma.array(
+                self.data,
+                dtype=FloatGrid.__dtype,
+                fill_value=FloatGrid.__fill_value,
+            ),
+            mask=self._mask if self.data.shape == self._mask.shape else None,
+            cmap=self.cmap,
+            title=self.title,
+            figsize=self.figsize,
+            **self.meta,
+        )
+
     @contextmanager
     def asdataset(self):
         with MemoryFile() as memfile:

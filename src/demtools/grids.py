@@ -1652,7 +1652,8 @@ class FeatureSet:
         self.centers = None
         self.labels = None
         self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
-        self.cluster(**kwargs)
+        if kwargs.get("do_cluster", True):
+            self.cluster(**kwargs)
 
     def cluster(self, **kwargs):
         print("Calculating initial clusters... ")

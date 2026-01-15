@@ -1583,8 +1583,6 @@ class DEMGrid(FloatGrid):
                     win[(X**2 + Y**2) > r**2] = 0
                 tpi = self.tpi_fft(win=win).filled
                 cube.append(tpi[~self._mask])
-        if kwargs.get("use_diff", False):
-            steps = steps[1:]
         return FeatureSet(
             np.array(cube).T, self._mask, self.meta, feature_coords=steps, **kwargs
         )
@@ -1720,9 +1718,11 @@ class FeatureSet:
     """
 
     def __init__(self, data, mask, meta, **kwargs):
+        self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
         if kwargs.get("use_diff", False):
             print("Calculating differences... ")
-            data = np.array([np.diff(r) for r in data])
+            self.feature_coords = np.diff(self.feature_coords)
+            data = np.array([np.diff(r) / self.feature_coords for r in data])
         self.data = data
         self._mask = mask
         self.meta = meta.copy()
@@ -1731,7 +1731,6 @@ class FeatureSet:
         self.clusters = None
         self.centers = None
         self.labels = None
-        self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
         if kwargs.get("do_cluster", True):
             self.cluster(**kwargs)
 

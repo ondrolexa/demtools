@@ -1721,8 +1721,10 @@ class FeatureSet:
         self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
         if kwargs.get("use_diff", False):
             print("Calculating differences... ")
-            self.feature_coords = np.diff(self.feature_coords)
-            data = np.array([np.diff(r) / self.feature_coords for r in data])
+            data = np.array([np.diff(r) / np.diff(self.feature_coords) for r in data])
+            self.feature_coords = (
+                self.feature_coords[:-1] + self.feature_coords[1:]
+            ) / 2
         self.data = data
         self._mask = mask
         self.meta = meta.copy()

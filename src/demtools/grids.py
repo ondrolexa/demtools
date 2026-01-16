@@ -1793,7 +1793,7 @@ class FeatureSet:
             cave = self.labels_average()
             if cmap is not None:
                 ax.set_prop_cycle(
-                    plt.cycler("color", cmap(np.linspace(0, 1, cave.shape[1])))
+                    plt.cycler("color", cmap(np.linspace(0, 1, cave.shape[0])))
                 )
             ax.plot(self.feature_coords, cave.T)
             for c, y in zip(cids, cave[:, -1]):

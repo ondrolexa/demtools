@@ -1723,9 +1723,6 @@ class FeatureSet:
         if kwargs.get("use_grad", False):
             print("Calculating gradient... ")
             data = np.gradient(data, self.feature_coords, axis=1)
-            self.feature_coords = (
-                self.feature_coords[:-1] + self.feature_coords[1:]
-            ) / 2
         self.data = data
         self._mask = mask
         self.meta = meta.copy()

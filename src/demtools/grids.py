@@ -1778,16 +1778,24 @@ class FeatureSet:
             labels[self.labels == b] = a
         self.labels = labels
 
-    def plot_averages(self, clusters=False, cmap="viridis"):
+    def plot_averages(self, clusters=False, cmap=None):
         fig, ax = plt.subplots()
         if clusters:
+            if cmap is not None:
+                ax.set_prop_cycle(
+                    plt.cycler("color", cmap(np.linspace(0, 1, self.centers.shape[1])))
+                )
             ax.plot(self.feature_coords, self.centers.T)
             for c, y in enumerate(self.centers[:, -1]):
                 ax.text(self.feature_coords[-1], y, f"{c}", verticalalignment="center")
         else:
             cids = np.unique(self.labels)
             cave = self.labels_average()
-            ax.plot(self.feature_coords, cave.T, cmap=cmap)
+            if cmap is not None:
+                ax.set_prop_cycle(
+                    plt.cycler("color", cmap(np.linspace(0, 1, cave.shape[1])))
+                )
+            ax.plot(self.feature_coords, cave.T)
             for c, y in zip(cids, cave[:, -1]):
                 ax.text(self.feature_coords[-1], y, f"{c}", verticalalignment="center")
         plt.show()

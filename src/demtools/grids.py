@@ -1570,7 +1570,7 @@ class DEMGrid(FloatGrid):
 
     def tpi_cube(self, **kwargs):
         n = kwargs.pop("n", 20)
-        scale = kwargs.pop("scale", 3.5)
+        scale = kwargs.pop("scale", 3.322)
         steps = np.arange(0, (n - 1) * 2**scale + 1, 2**scale, dtype=int)
         for r in tqdm(steps, desc="Calculating TPI"):
             if r == 0:
@@ -1715,13 +1715,14 @@ class FeatureSet:
             corresponds to valid raster cells.
         mask (numpy.array): boolean array mask
         meta (dict): rasterio metadata
+        use_grad (bool, optional): Use gradient of data. Default False
     """
 
     def __init__(self, data, mask, meta, **kwargs):
         self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
-        if kwargs.get("use_diff", False):
-            print("Calculating differences... ")
-            data = np.array([np.diff(r) / np.diff(self.feature_coords) for r in data])
+        if kwargs.get("use_grad", False):
+            print("Calculating gradient... ")
+            data = np.gradient(data, self.feature_coords, axis=1)
             self.feature_coords = (
                 self.feature_coords[:-1] + self.feature_coords[1:]
             ) / 2
@@ -1780,7 +1781,7 @@ class FeatureSet:
             labels[self.labels == b] = a
         self.labels = labels
 
-    def plot_averages(self, clusters=False):
+    def plot_averages(self, clusters=False, cmap="viridis"):
         fig, ax = plt.subplots()
         if clusters:
             ax.plot(self.feature_coords, self.centers.T)
@@ -1789,7 +1790,7 @@ class FeatureSet:
         else:
             cids = np.unique(self.labels)
             cave = self.labels_average()
-            ax.plot(self.feature_coords, cave.T)
+            ax.plot(self.feature_coords, cave.T, cmap=cmap)
             for c, y in zip(cids, cave[:, -1]):
                 ax.text(self.feature_coords[-1], y, f"{c}", verticalalignment="center")
         plt.show()

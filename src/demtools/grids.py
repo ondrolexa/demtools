@@ -19,7 +19,7 @@ from rasterio import Affine, MemoryFile
 from rasterio.enums import Resampling
 from scipy import ndimage, signal
 from scipy.cluster import hierarchy
-from sklearn.cluster import AgglomerativeClustering, KMeans
+from sklearn.cluster import AgglomerativeClustering, KMeans, MiniBatchKMeans
 from tqdm import tqdm
 
 from demtools.mathlib import derivx, derivy, derivz, upcontinue
@@ -1742,6 +1742,24 @@ class FeatureSet:
             init=kwargs.get("init", "k-means++"),
         )
         self.clusters = kmeans.fit_predict(self.data)
+        self.centers = kmeans.cluster_centers_
+        self.aggclusters(**kwargs)
+        print("Done.")
+
+    def batch_cluster(self, **kwargs):
+        print("Calculating initial clusters... ")
+        kmeans = MiniBatchKMeans(
+            n_clusters=kwargs.get("n_kmeans", 128),
+            random_state=kwargs.get("random_state", 42),
+            init=kwargs.get("init", "k-means++"),
+            batch_size=kwargs.get("batch_size", 1024),
+            n_init=kwargs.get("n_init", "auto"),
+        )
+        n = self.data.shape[0]
+        bs = kwargs.get("bs", 1000000)
+        for x in range(0, n, bs):
+            kmeans = kmeans.partial_fit(self.data[x : min(x + bs, n), :])
+        self.clusters = kmeans.predict(self.data)
         self.centers = kmeans.cluster_centers_
         self.aggclusters(**kwargs)
         print("Done.")

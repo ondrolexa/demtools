@@ -1735,21 +1735,24 @@ class FeatureSet:
             self.cluster(**kwargs)
 
     def cluster(self, **kwargs):
-        print("Calculating initial clusters... ")
-        kmeans = KMeans(
-            n_clusters=kwargs.get("n_kmeans", 128),
-            random_state=kwargs.get("random_state", 42),
-            init=kwargs.get("init", "k-means++"),
-        )
-        self.clusters = kmeans.fit_predict(self.data)
-        self.centers = kmeans.cluster_centers_
+        model = kwargs.get("model", None)
+        if model is None:
+            print("Calculating initial clusters... ")
+            model = KMeans(
+                n_clusters=kwargs.get("n_kmeans", 256),
+                random_state=kwargs.get("random_state", 42),
+                init=kwargs.get("init", "k-means++"),
+            )
+            model.fit(self.data)
+        self.clusters = model.predict(self.data)
+        self.centers = model.cluster_centers_
         self.aggclusters(**kwargs)
         print("Done.")
 
     def batch_cluster(self, **kwargs):
         print("Calculating initial clusters... ")
         kmeans = MiniBatchKMeans(
-            n_clusters=kwargs.get("n_kmeans", 128),
+            n_clusters=kwargs.get("n_kmeans", 256),
             random_state=kwargs.get("random_state", 42),
             init=kwargs.get("init", "k-means++"),
             batch_size=kwargs.get("batch_size", 1024),

@@ -16,11 +16,10 @@ def _nextpow2(i):
     return int(2**buf)
 
 
-def _fftfreqs(dx, dy, shape, padshape):
+def _fftfreqs(dx, dy, padshape):
     """
     Get two 2D-arrays with the wave numbers in the x and y directions.
     """
-    nx, ny = shape
     fx = 2 * np.pi * np.fft.fftfreq(padshape[0], dx)
     fy = 2 * np.pi * np.fft.fftfreq(padshape[1], dy)
     return np.meshgrid(fy, fx)[::-1]
@@ -46,7 +45,7 @@ def derivz(data, dx, dy):
     nx, ny = data.shape
     # Pad the array with the edge values to avoid instability
     padded, padx, pady = _pad_data(data, data.shape)
-    kx, ky = _fftfreqs(dx, dy, data.shape, padded.shape)
+    kx, ky = _fftfreqs(dx, dy, padded.shape)
     deriv_ft = np.fft.fft2(padded) * np.sqrt(kx**2 + ky**2)
     deriv = np.real(np.fft.ifft2(deriv_ft))
     # Remove padding from derivative
@@ -57,7 +56,7 @@ def upcontinue(data, dx, dy, height):
     nx, ny = data.shape
     # Pad the array with the edge values to avoid instability
     padded, padx, pady = _pad_data(data, data.shape)
-    kx, ky = _fftfreqs(dx, dy, data.shape, padded.shape)
+    kx, ky = _fftfreqs(dx, dy, padded.shape)
     kz = np.sqrt(kx**2 + ky**2)
     upcont_ft = np.fft.fft2(padded) * np.exp(-height * kz)
     cont = np.real(np.fft.ifft2(upcont_ft))

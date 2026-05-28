@@ -26,8 +26,8 @@ from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
 
 class Grid:
-    __dtype = None
-    __fill_value = None
+    _dtype = None
+    _fill_value = None
 
     def __init__(self, data, **kwargs):
         self.cmap = kwargs.get("cmap", None)
@@ -36,8 +36,8 @@ class Grid:
         self.figsize = kwargs.get("figsize", plt.rcParams["figure.figsize"])
         self.meta = {
             "driver": "GTiff",
-            "dtype": np.dtype(self.__class__.__dtype),
-            "nodata": self.__class__.__fill_value,
+            "dtype": np.dtype(self.__class__._dtype),
+            "nodata": self.__class__._fill_value,
             "width": 0,
             "height": 0,
             "count": 1,
@@ -82,7 +82,10 @@ class Grid:
 
     @property
     def _mask(self):
-        return ma.getmask(self.data)
+        m = ma.getmask(self.data)
+        if m is ma.nomask:
+            return np.zeros(self.shape, dtype=bool)
+        return m
 
     @property
     def shape(self):
@@ -101,11 +104,11 @@ class Grid:
         return self.clone(data)
 
     def __setitem__(self, mask, value):
-        value = np.array(value, np.dtype(self.__class__.__dtype))
+        value = np.array(value, np.dtype(self.__class__._dtype))
         if value.ndim > 0:
             value = value.flatten()[0]
         if isinstance(mask, BoolGrid):
-            mask2 = np.logical_and(~self._mask, mask._mask)
+            mask2 = np.logical_and(~self._mask, mask._array)
         else:
             mask2 = np.logical_and(~self._mask, mask)
         self.data[mask2] = value.item()
@@ -295,7 +298,7 @@ class Grid:
                 full,
                 mask=self._mask,
                 cmap=kwargs.get("cmap", self.cmap),
-                # stretch=kwargs.get("stretch", self.stretch),
+                stretch=kwargs.get("stretch", self.stretch),
                 title=kwargs.get("title", self.title),
                 figsize=kwargs.get("figsize", self.figsize),
                 **meta,
@@ -307,19 +310,19 @@ class Grid:
                     "mask", self._mask if data.shape == self._mask.shape else None
                 ),
                 cmap=kwargs.get("cmap", self.cmap),
-                # stretch=kwargs.get("stretch", self.stretch),
+                stretch=kwargs.get("stretch", self.stretch),
                 title=kwargs.get("title", self.title),
                 figsize=kwargs.get("figsize", self.figsize),
                 **meta,
             )
 
     def asbool(self):
-        """Return grid as FloatGrid"""
+        """Return grid as BoolGrid"""
         return BoolGrid(
             ma.array(
                 self.data,
-                dtype=FloatGrid.__dtype,
-                fill_value=FloatGrid.__fill_value,
+                dtype=BoolGrid._dtype,
+                fill_value=BoolGrid._fill_value,
             ),
             mask=self._mask if self.data.shape == self._mask.shape else None,
             cmap=self.cmap,
@@ -329,12 +332,12 @@ class Grid:
         )
 
     def asint(self):
-        """Return grid as FloatGrid"""
+        """Return grid as IntGrid"""
         return IntGrid(
             ma.array(
                 self.data,
-                dtype=FloatGrid.__dtype,
-                fill_value=FloatGrid.__fill_value,
+                dtype=IntGrid._dtype,
+                fill_value=IntGrid._fill_value,
             ),
             mask=self._mask if self.data.shape == self._mask.shape else None,
             cmap=self.cmap,
@@ -348,8 +351,8 @@ class Grid:
         return FloatGrid(
             ma.array(
                 self.data,
-                dtype=FloatGrid.__dtype,
-                fill_value=FloatGrid.__fill_value,
+                dtype=FloatGrid._dtype,
+                fill_value=FloatGrid._fill_value,
             ),
             mask=self._mask if self.data.shape == self._mask.shape else None,
             cmap=self.cmap,
@@ -397,8 +400,8 @@ class Grid:
         with rio.open(filename) as src:
             data = src.read(band, masked=True)
             meta = src.meta
-            # meta["dtype"] = cls.__dtype
-            # meta["nodata"] = cls.__fill_value
+            # meta["dtype"] = cls._dtype
+            # meta["nodata"] = cls._fill_value
         return cls(data, **kwargs, **meta)
 
     def write_tif(self, filename):
@@ -447,6 +450,7 @@ class Grid:
         c_grid = np.ones(self.data.shape, dtype=int)
         c_grid[self._mask] = 0
         n_count = ndimage.convolve(c_grid, win, mode="constant")
+        n_sum = n_sum.astype(float)
         n_sum[self._mask] = np.nan
         return n_sum, n_count
 
@@ -547,25 +551,24 @@ class Grid:
             index = np.delete(index, 0)
         # aggregate
         method = kwargs.get("method", "mean")
-        match method:
-            case "maximum":
-                agg = ndimage.maximum(self._array, labels=labels, index=index)
-            case "mean":
-                agg = ndimage.mean(self._array, labels=labels, index=index)
-            case "median":
-                agg = ndimage.median(self._array, labels=labels, index=index)
-            case "minimum":
-                agg = ndimage.minimum(self._array, labels=labels, index=index)
-            case "standard_deviation":
-                agg = ndimage.standard_deviation(
-                    self._array, labels=labels, index=index
-                )
-            case "variance":
-                agg = ndimage.standard_deviation(
-                    self._array, labels=labels, index=index
-                )
-            case _:
-                raise ValueError(f"Method {method} is not available")
+        with np.errstate(invalid="ignore"):
+            match method:
+                case "maximum":
+                    agg = ndimage.maximum(self._array, labels=labels, index=index)
+                case "mean":
+                    agg = ndimage.mean(self._array, labels=labels, index=index)
+                case "median":
+                    agg = ndimage.median(self._array, labels=labels, index=index)
+                case "minimum":
+                    agg = ndimage.minimum(self._array, labels=labels, index=index)
+                case "standard_deviation":
+                    agg = ndimage.standard_deviation(
+                        self._array, labels=labels, index=index
+                    )
+                case "variance":
+                    agg = ndimage.variance(self._array, labels=labels, index=index)
+                case _:
+                    raise ValueError(f"Method {method} is not available")
         # reconstruct
         _, bix = np.unique(agg_index, return_inverse=True)
         res = agg[bix]
@@ -671,8 +674,8 @@ class BoolGrid(Grid):
 
     """
 
-    __dtype = "bool"
-    __fill_value = False
+    _dtype = "bool"
+    _fill_value = False
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
@@ -702,7 +705,7 @@ class BoolGrid(Grid):
 
     @property
     def count_false(self):
-        return np.sum(~self._values).item()
+        return len(self._values) - self.count_true
 
     def erosion(self, **kwargs):
         """Binary erosion of True regions
@@ -831,8 +834,8 @@ class IntGrid(Grid):
 
     """
 
-    __dtype = "int"
-    __fill_value = -9999
+    _dtype = "int"
+    _fill_value = -9999
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
@@ -840,21 +843,21 @@ class IntGrid(Grid):
         self.title = kwargs.get("title", "IntGrid")
 
     def __truediv__(self, other):
-        if isinstance(other, DEMGrid):
+        if isinstance(other, Grid):
             data = self.data // other.data.astype(int)
         else:
             data = self.data // int(other)
         return self.clone(data)
 
     def __rtruediv__(self, other):
-        if isinstance(other, DEMGrid):
+        if isinstance(other, Grid):
             data = other.data.astype(int) // self.data
         else:
             data = int(other) // self.data
         return self.clone(data)
 
     def __itruediv__(self, other):
-        if isinstance(other, DEMGrid):
+        if isinstance(other, Grid):
             self.data //= other.data.astype(int)
         else:
             self.data //= int(other)
@@ -901,10 +904,21 @@ class IntGrid(Grid):
             size(int, optional): Size in pixels of regions to remove. Default 1
 
         """
-        values, counts = self.counts()
-        counts[values[values == 0]] = 0
-        mask_sizes = counts > kwargs.pop("size", 1)
-        return self.clone(mask_sizes[self.data.filled()], **kwargs)
+        size = kwargs.pop("size", 1)
+        filled = self.filled
+        nodata = self.meta["nodata"]
+        result = filled.copy()
+        for val in np.unique(filled):
+            if val == nodata:
+                continue
+            val_mask = filled == val
+            labels, _ = ndimage.label(val_mask)
+            region_sizes = np.bincount(labels.ravel())
+            small = np.where(region_sizes <= size)[0]
+            small = small[small != 0]
+            for rid in small:
+                result[labels == rid] = nodata
+        return self.clone(result, **kwargs)
 
     def moving_average(self, **kwargs):
         """Returns moving window average
@@ -932,8 +946,6 @@ class IntGrid(Grid):
         """
 
         def most_common(a):
-            print(a, type(a))
-            print("-------------------")
             return Counter(a).most_common(1)[0][0].item()
 
         size = kwargs.get("size", 3)
@@ -1006,8 +1018,8 @@ class FloatGrid(Grid):
 
     """
 
-    __dtype = "float"
-    __fill_value = np.nan
+    _dtype = "float"
+    _fill_value = np.nan
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
@@ -1205,7 +1217,7 @@ class FloatGrid(Grid):
 
         """
         up = upcontinue(
-            self.data, self.meta["transform"].a, self.meta["transform"].e, h
+            self.filled, self.meta["transform"].a, self.meta["transform"].e, h
         )
         up[np.isnan(self._dx) | np.isnan(self._dy)] = np.nan
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
@@ -1416,8 +1428,8 @@ class DEMGrid(FloatGrid):
 
     """
 
-    __dtype = "float"
-    __fill_value = np.nan
+    _dtype = "float"
+    _fill_value = np.nan
 
     def __init__(self, data, **kwargs):
         super().__init__(data, **kwargs)
@@ -1559,6 +1571,7 @@ class DEMGrid(FloatGrid):
         # do fast convolution
         n_sum = signal.convolve(self.data.filled(0), win, mode="same")
         n_count = signal.convolve(c_grid, win, mode="same")
+        n_sum = n_sum.astype(float)
         n_sum[self._mask] = np.nan
         # this is TPI (spot height – average neighbourhood height)
         tpi = self.filled - n_sum / n_count

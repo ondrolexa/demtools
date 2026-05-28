@@ -1,3 +1,5 @@
+"""HDF5 storage adapter for DEM grids."""
+
 import h5py
 import numpy as np
 
@@ -5,6 +7,19 @@ from demtools.grids import Affine, DEMGrid, riocrs
 
 
 class H5Store:
+    """Read-only adapter that exposes an HDF5 file as a DEMGrid source.
+
+    The HDF5 file must contain ``x``, ``y``, ``Band1`` datasets and a
+    ``grid_mapping`` attribute on ``Band1`` pointing to a group with
+    ``crs_wkt`` and ``GeoTransform`` attributes.
+
+    Args:
+        file (str or pathlib.Path): Path to the HDF5 file.
+
+    Attributes:
+        data (h5py.Dataset): The ``Band1`` dataset handle.
+    """
+
     def __init__(self, file):
         self.h5file = h5py.File(file, "r")
         self.data = self.h5file["Band1"]
@@ -14,17 +29,31 @@ class H5Store:
 
     @property
     def x(self):
+        """numpy.ndarray: 1-D array of x coordinates."""
         return np.array(self.h5file["x"])
 
     @property
     def y(self):
+        """numpy.ndarray: 1-D array of y coordinates."""
         return np.array(self.h5file["y"])
 
     @property
     def mapping(self):
+        """h5py.Group: The grid mapping group referenced by ``Band1``."""
         return self.h5file[self.data.attrs["grid_mapping"].decode()]
 
     def clip(self, r, h, c, w):
+        """Extract a rectangular sub-region as a ``DEMGrid``.
+
+        Args:
+            r (int): Start row index (0-based, from the top).
+            h (int): Height of the clip window in pixels.
+            c (int): Start column index (0-based, from the left).
+            w (int): Width of the clip window in pixels.
+
+        Returns:
+            DEMGrid: The clipped sub-region with correct geotransform.
+        """
         ymax = len(self.y)
         fv = self.data.attrs["_FillValue"][0]
         res = np.flipud(
@@ -44,4 +73,3 @@ class H5Store:
             "transform": Affine(gt[1], 0.0, gt[0], 0.0, gt[5], gt[3]),
         }
         return DEMGrid(res, **meta)
-        # return res, meta

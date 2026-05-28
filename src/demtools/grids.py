@@ -1,3 +1,5 @@
+"""Raster grid classes built on ``numpy.ma.MaskedArray`` and ``rasterio``."""
+
 import importlib.resources
 from collections import Counter
 from contextlib import contextmanager
@@ -13,6 +15,7 @@ import rasterio.crs as riocrs
 import rasterio.features as riofeatures
 import rasterio.plot as rioplot
 import rasterio.sample as riosample
+import requests
 import shapely.geometry as shapelygeom
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from rasterio import Affine, MemoryFile
@@ -26,6 +29,28 @@ from demtools.mathlib import derivx, derivy, derivz, upcontinue
 
 
 class Grid:
+    """Base raster grid class.
+
+    Wraps a :class:`numpy.ma.MaskedArray` with :mod:`rasterio` CRS and
+    geotransform metadata. Provides arithmetic, comparison, I/O, and
+    spatial operations.
+
+    Subclasses MUST set ``_dtype`` and ``_fill_value`` class attributes.
+
+    Args:
+        data (numpy.ma.MaskedArray or numpy.ndarray): Input data.
+        cmap (str, optional): Matplotlib colormap name. Default ``None``.
+        title (str, optional): Dataset title. Default ``None``.
+        stretch (bool, optional): Stretch colormap to 2–98 percentile.
+            Default ``False``.
+        figsize (tuple, optional): Figure size in inches.
+            Default ``plt.rcParams["figure.figsize"]``.
+        mask (numpy.ndarray, optional): Boolean mask; ``True`` entries are
+            masked. Default ``None``.
+        **meta: Additional rasterio metadata keys (``driver``, ``crs``,
+            ``transform``, ``width``, ``height``, ``nodata``, ``compress``).
+    """
+
     _dtype = None
     _fill_value = None
 
@@ -71,6 +96,7 @@ class Grid:
         self.data = data.copy()
 
     def __repr__(self):
+        """Return a printable summary of the grid."""
         return (
             f"{self.__class__.__name__} {self.title} {self.shape} {self.resolution} "
             + f"masked:{self._mask.sum()} EPSG:{self.meta['crs'].to_epsg()}"
@@ -78,10 +104,12 @@ class Grid:
 
     @property
     def _array(self):
+        """numpy.ndarray: Underlying data array (without mask)."""
         return ma.getdata(self.data)
 
     @property
     def _mask(self):
+        """numpy.ndarray: Boolean mask array (``True`` = masked)."""
         m = ma.getmask(self.data)
         if m is ma.nomask:
             return np.zeros(self.shape, dtype=bool)
@@ -89,13 +117,24 @@ class Grid:
 
     @property
     def shape(self):
+        """tuple: ``(height, width)`` of the grid in pixels."""
         return self.data.shape
 
     @property
     def resolution(self):
+        """tuple: ``(x_resolution, y_resolution)`` in CRS units."""
         return abs(self.meta["transform"].a), abs(self.meta["transform"].e)
 
     def __getitem__(self, mask):
+        """Mask grid with a boolean mask and return as a new grid.
+
+        Args:
+            mask (BoolGrid or numpy.ndarray): Boolean mask. Pixels
+                corresponding to ``False`` entries are masked in the result.
+
+        Returns:
+            Grid: New grid with additional masking applied.
+        """
         data = self.data.copy()
         if isinstance(mask, BoolGrid):
             data[~mask._array] = ma.masked
@@ -104,6 +143,12 @@ class Grid:
         return self.clone(data)
 
     def __setitem__(self, mask, value):
+        """Set values at unmasked positions selected by a boolean mask.
+
+        Args:
+            mask (BoolGrid or numpy.ndarray): Boolean mask of positions to set.
+            value (int or float): Value to assign at selected positions.
+        """
         value = np.array(value, np.dtype(self.__class__._dtype))
         if value.ndim > 0:
             value = value.flatten()[0]
@@ -114,6 +159,14 @@ class Grid:
         self.data[mask2] = value.item()
 
     def __add__(self, other):
+        """Element-wise addition.
+
+        Args:
+            other (Grid or scalar): Value to add.
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = self.data + other.data
         else:
@@ -121,9 +174,11 @@ class Grid:
         return self.clone(data)
 
     def __radd__(self, other):
+        """Element-wise reverse addition (``other + self``)."""
         return self.__add__(other)
 
     def __iadd__(self, other):
+        """In-place element-wise addition."""
         if issubclass(type(other), Grid):
             self.data += other.data
         else:
@@ -131,6 +186,14 @@ class Grid:
         return self
 
     def __sub__(self, other):
+        """Element-wise subtraction.
+
+        Args:
+            other (Grid or scalar): Value to subtract.
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = self.data - other.data
         else:
@@ -138,6 +201,11 @@ class Grid:
         return self.clone(data)
 
     def __rsub__(self, other):
+        """Element-wise reverse subtraction (``other - self``).
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = other.data - self.data
         else:
@@ -145,6 +213,7 @@ class Grid:
         return self.clone(data)
 
     def __isub__(self, other):
+        """In-place element-wise subtraction."""
         if issubclass(type(other), Grid):
             self.data -= other.data
         else:
@@ -152,6 +221,14 @@ class Grid:
         return self
 
     def __mul__(self, other):
+        """Element-wise multiplication.
+
+        Args:
+            other (Grid or scalar): Value to multiply by.
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = self.data * other.data
         else:
@@ -159,9 +236,11 @@ class Grid:
         return self.clone(data)
 
     def __rmul__(self, other):
+        """Element-wise reverse multiplication (``other * self``)."""
         return self.__mul__(other)
 
     def __imul__(self, other):
+        """In-place element-wise multiplication."""
         if issubclass(type(other), Grid):
             self.data *= other.data
         else:
@@ -169,6 +248,14 @@ class Grid:
         return self
 
     def __truediv__(self, other):
+        """Element-wise true division.
+
+        Args:
+            other (Grid or scalar): Divisor.
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = self.data / other.data
         else:
@@ -176,6 +263,11 @@ class Grid:
         return self.clone(data)
 
     def __rtruediv__(self, other):
+        """Element-wise reverse true division (``other / self``).
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = other.data / self.data
         else:
@@ -183,6 +275,7 @@ class Grid:
         return self.clone(data)
 
     def __itruediv__(self, other):
+        """In-place element-wise true division."""
         if issubclass(type(other), Grid):
             self.data /= other.data
         else:
@@ -190,6 +283,14 @@ class Grid:
         return self
 
     def __floordiv__(self, other):
+        """Element-wise floor division.
+
+        Args:
+            other (Grid or scalar): Divisor.
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = self.data // other.data
         else:
@@ -197,6 +298,11 @@ class Grid:
         return self.clone(data)
 
     def __rfloordiv__(self, other):
+        """Element-wise reverse floor division (``other // self``).
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = other.data // self.data
         else:
@@ -204,6 +310,7 @@ class Grid:
         return self.clone(data)
 
     def __ifloordiv__(self, other):
+        """In-place element-wise floor division."""
         if issubclass(type(other), Grid):
             self.data //= other.data
         else:
@@ -211,6 +318,14 @@ class Grid:
         return self
 
     def __pow__(self, other):
+        """Element-wise exponentiation.
+
+        Args:
+            other (Grid or scalar): Exponent.
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = self.data**other.data
         else:
@@ -218,6 +333,11 @@ class Grid:
         return self.clone(data)
 
     def __rpow__(self, other):
+        """Element-wise reverse exponentiation (``other ** self``).
+
+        Returns:
+            Grid: Result as a new grid.
+        """
         if issubclass(type(other), Grid):
             data = other.data**self.data
         else:
@@ -225,6 +345,11 @@ class Grid:
         return self.clone(data)
 
     def __lt__(self, other):
+        """Element-wise less-than comparison.
+
+        Returns:
+            BoolGrid: Boolean grid of comparison results.
+        """
         if issubclass(type(other), Grid):
             data = self.data < other.data
         else:
@@ -232,6 +357,11 @@ class Grid:
         return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __le__(self, other):
+        """Element-wise less-than-or-equal comparison.
+
+        Returns:
+            BoolGrid: Boolean grid of comparison results.
+        """
         if issubclass(type(other), Grid):
             data = self.data <= other.data
         else:
@@ -239,6 +369,11 @@ class Grid:
         return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __eq__(self, other):
+        """Element-wise equality comparison.
+
+        Returns:
+            BoolGrid: Boolean grid of comparison results.
+        """
         if issubclass(type(other), Grid):
             data = self.data == other.data
         else:
@@ -246,6 +381,11 @@ class Grid:
         return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __ne__(self, other):
+        """Element-wise not-equal comparison.
+
+        Returns:
+            BoolGrid: Boolean grid of comparison results.
+        """
         if issubclass(type(other), Grid):
             data = self.data != other.data
         else:
@@ -253,6 +393,11 @@ class Grid:
         return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __gt__(self, other):
+        """Element-wise greater-than comparison.
+
+        Returns:
+            BoolGrid: Boolean grid of comparison results.
+        """
         if issubclass(type(other), Grid):
             data = self.data > other.data
         else:
@@ -260,6 +405,11 @@ class Grid:
         return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def __ge__(self, other):
+        """Element-wise greater-than-or-equal comparison.
+
+        Returns:
+            BoolGrid: Boolean grid of comparison results.
+        """
         if issubclass(type(other), Grid):
             data = self.data >= other.data
         else:
@@ -267,23 +417,45 @@ class Grid:
         return self.clone(data, cmap="binary", astype=BoolGrid, nodata=False)
 
     def copy(self, **kwargs):
+        """Return a deep copy with optional dtype conversion.
+
+        Args:
+            dtype (numpy.dtype, optional): Override output dtype.
+            **kwargs: Passed through to :meth:`clone`.
+
+        Returns:
+            Grid: Copy of the grid.
+        """
         dtype = kwargs.pop("dtype", self.meta["dtype"])
         return self.clone(self.data.astype(dtype).copy(), **kwargs)
 
     @property
     def filled(self):
+        """numpy.ndarray: Data with masked values replaced by the nodata value."""
         return self.data.filled(self.meta["nodata"])
 
     def clone(self, data, **kwargs):
-        """Clone grid with new data
+        """Create a new grid of the same (or specified) type with new data.
 
         Args:
-            data (numpy.ma.MaskedArray): data as masked numpy array
-            cmap (str, optional): Colormap. Default keep original.
-            stretch (bool, optional): Stretch colormap. Default keep original.
-            title (str, optional): Title of dataset. Default keep original.
-            figsize (tuple, optional): matplotlib figure size. Default keep original.
+            data (numpy.ndarray or numpy.ma.MaskedArray): New data.
+            astype (type, optional): Subclass to instantiate. Defaults to
+                ``type(self)``.
+            cmap (str, optional): Colormap. Defaults to original.
+            stretch (bool, optional): Stretch colormap. Defaults to original.
+            title (str, optional): Dataset title. Defaults to original.
+            figsize (tuple, optional): Figure size. Defaults to original.
+            mask (numpy.ndarray, optional): Boolean mask. Defaults to the
+                current mask if shapes match.
+            only_valid (bool, optional): If ``True``, rebuild the full 2-D
+                array by placing *data* at unmasked positions.
+                Default ``False``.
+            dtype (numpy.dtype, optional): Override output dtype.
+            nodata (scalar, optional): Override nodata value.
+            meta (dict, optional): Full rasterio metadata dict override.
 
+        Returns:
+            Grid: New grid with *data*.
         """
         assert isinstance(data, np.ndarray), "Data must be the numpy.ndarray."
         typObj = kwargs.pop("astype", type(self))
@@ -317,7 +489,11 @@ class Grid:
             )
 
     def asbool(self):
-        """Return grid as BoolGrid"""
+        """Convert to :class:`BoolGrid`.
+
+        Returns:
+            BoolGrid: Boolean grid.
+        """
         return BoolGrid(
             ma.array(
                 self.data,
@@ -332,7 +508,11 @@ class Grid:
         )
 
     def asint(self):
-        """Return grid as IntGrid"""
+        """Convert to :class:`IntGrid`.
+
+        Returns:
+            IntGrid: Integer grid.
+        """
         return IntGrid(
             ma.array(
                 self.data,
@@ -347,7 +527,11 @@ class Grid:
         )
 
     def asfloat(self):
-        """Return grid as FloatGrid"""
+        """Convert to :class:`FloatGrid`.
+
+        Returns:
+            FloatGrid: Float grid.
+        """
         return FloatGrid(
             ma.array(
                 self.data,
@@ -363,6 +547,11 @@ class Grid:
 
     @contextmanager
     def asdataset(self):
+        """Context manager exposing the grid as a :class:`rasterio.DatasetReader`.
+
+        Yields:
+            rasterio.DatasetReader: In-memory read-only dataset.
+        """
         with MemoryFile() as memfile:
             # if np.any(self._mask):
             with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
@@ -372,6 +561,18 @@ class Grid:
                 yield dataset  # Note yield not return
 
     def index(self, point, linear=False):
+        """Return the grid row/col for a geographic coordinate.
+
+        Args:
+            point (tuple): ``(x, y)`` coordinate in the dataset's CRS.
+            linear (bool, optional): If ``True``, return a linear (flattened)
+                index. Default ``False``.
+
+        Returns:
+            tuple or int or None: ``(row, col)`` tuple (or linear index if
+            *linear*=``True``), or ``None`` if the point is masked or out
+            of bounds.
+        """
         with self.asdataset() as src:
             idx = src.index(*point)
         try:
@@ -389,27 +590,28 @@ class Grid:
 
     @classmethod
     def from_file(cls, filename, **kwargs):
-        """Read dataset from georeferenced file
+        """Read a grid from a georeferenced raster file.
 
         Args:
-            filename(str): Filename to read.
-            band(int, optional): Band to read. Default 1.
+            filename (str): Path to the raster file.
+            band (int, optional): Band to read. Default ``1``.
 
+        Returns:
+            Grid: New grid instance with data and metadata from the file.
         """
         band = kwargs.get("band", 1)
         with rio.open(filename) as src:
             data = src.read(band, masked=True)
             meta = src.meta
-            # meta["dtype"] = cls._dtype
-            # meta["nodata"] = cls._fill_value
         return cls(data, **kwargs, **meta)
 
     def write_tif(self, filename):
-        """Write dataset to georeferenced file
+        """Write grid to a GeoTIFF file.
+
+        Writes an internal mask when the grid has masked pixels.
 
         Args:
-            filename (str): filename
-
+            filename (str): Output file path.
         """
         if np.any(self._mask):
             with rio.Env(GDAL_TIFF_INTERNAL_MASK=True):
@@ -422,9 +624,21 @@ class Grid:
 
     @property
     def _values(self):
+        """numpy.ndarray: Flattened array of unmasked values only."""
         return self.data.compressed()
 
     def clip(self, r, h, c, w, **kwargs):
+        """Extract a rectangular sub-region.
+
+        Args:
+            r (int): Start row (0-based).
+            h (int): Number of rows.
+            c (int): Start column (0-based).
+            w (int): Number of columns.
+
+        Returns:
+            Grid: Clipped sub-region with updated transform.
+        """
         res = self.data[r : r + h, c : c + w]
         # update metadata
         meta = self.meta.copy()
@@ -437,6 +651,23 @@ class Grid:
         return self.clone(res, meta=meta, **kwargs)
 
     def _kernel(self, **kwargs):
+        """Compute the sum and count of pixels in a moving window.
+
+        The window is a binary disk (or a custom array). Masked pixels are
+        excluded from both the sum and the count.
+
+        Args:
+            win (numpy.ndarray, optional): Binary window array. Default
+                ``None`` (creates a disk with radius *r*).
+            r (int, optional): Disk radius in pixels. Default ``5``.
+            exclude_centre (bool, optional): Zero out the centre pixel of
+                the window. Default ``False``.
+
+        Returns:
+            tuple: ``(n_sum, n_count)`` where *n_sum* is the sum of pixel
+            values in the window (float), NaN where masked, and *n_count* is
+            the number of unmasked pixels in the window.
+        """
         win = kwargs.get("win", None)
         if win is None:
             r = kwargs.get("r", 5)
@@ -455,12 +686,28 @@ class Grid:
         return n_sum, n_count
 
     def generic_filter(self, func, size, **kwargs):
+        """Apply an arbitrary function over moving windows.
+
+        Args:
+            func (callable): Function applied to each window.
+            size (int or tuple): Window size.
+
+        Returns:
+            Grid: Filtered grid.
+        """
         d = self.filled
         res = ndimage.generic_filter(d, func, size=size)
         return self.clone(res, **kwargs)
 
     def correlation(self, filter, **kwargs):
-        """Return the correlation between grid and filter"""
+        """Return the correlation between the grid and a filter kernel.
+
+        Args:
+            filter (numpy.ndarray): 2-D kernel of odd dimensions.
+
+        Returns:
+            Grid: Correlation map.
+        """
         assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
             1,
             1,
@@ -483,7 +730,17 @@ class Grid:
         return self.clone(res, **kwargs)
 
     def similarity(self, filter, **kwargs):
-        """Return the similarity between grid and filter"""
+        """Return the similarity between the grid and a filter kernel.
+
+        Computed as the mean squared difference between kernel weights and
+        grid values in each window.
+
+        Args:
+            filter (numpy.ndarray): 2-D kernel of odd dimensions.
+
+        Returns:
+            Grid: Similarity map.
+        """
         assert (filter.shape[0] % 2, filter.shape[1] % 2) == (
             1,
             1,
@@ -506,14 +763,17 @@ class Grid:
         return self.clone(res, **kwargs)
 
     def aggregate(self, size, **kwargs):
-        """Create aggregate dataset from squared blocks
+        """Create an aggregated (coarser) grid from squared blocks.
 
         Args:
-            size(int): Size of blocks.
-            method (str): Aggregation function. One of `"maximum"`, `"mean"`,
-                `"median"`, `"minimum"`, `"standard_deviation"`, `"variance"`.
-                Default is `"mean"`.
+            size (int): Side length of each square block in pixels.
+            method (str, optional): Aggregation function. One of
+                ``"maximum"``, ``"mean"``, ``"median"``, ``"minimum"``,
+                ``"standard_deviation"``, ``"variance"``.
+                Default ``"mean"``.
 
+        Returns:
+            Grid: Aggregated grid.
         """
         # align blocks
         h, w = self.shape
@@ -584,24 +844,29 @@ class Grid:
         return self.clone(res, meta=meta, **kwargs)
 
     def sample(self, pts):
-        """Returns array of values for sample points
+        """Return values at specified coordinates.
 
         Args:
-            pts(iterable): Pairs of x, y coordinates in the dataset’s reference system.
+            pts (iterable): Pairs of ``(x, y)`` coordinates in the
+                dataset's CRS.
 
+        Returns:
+            numpy.ndarray: 1-D array of sampled values.
         """
         with self.asdataset() as src:
             res = np.array([*riosample.sample_gen(src, pts)]).flatten()
         return res
 
     def sample_line(self, p1, p2, n=10):
-        """Returns array of values along line defined by endpoints p1 and p2
+        """Return values along a line between two points.
 
         Args:
-            p1(tuple): Pair of x, y coordinates in the dataset’s reference system
-            p2(tuple): Pair of x, y coordinates in the dataset’s reference system
-            n(int, optional): NUmber of points sampled along line. Default `10`
+            p1 (tuple): ``(x, y)`` start coordinate.
+            p2 (tuple): ``(x, y)`` end coordinate.
+            n (int, optional): Number of sample points. Default ``10``.
 
+        Returns:
+            numpy.ndarray: 1-D array of sampled values along the line.
         """
         pts = (
             (p1[0] + k * (p2[0] - p1[0]), p1[1] + k * (p2[1] - p1[1]))
@@ -610,6 +875,16 @@ class Grid:
         return self.sample(pts)
 
     def ginput(self, **kwargs):
+        """Interactively select points on the grid plot.
+
+        Args:
+            n (int, optional): Number of points to select. Default ``1``.
+            **kwargs: Passed through to :meth:`show` and
+                :func:`matplotlib.pyplot.ginput`.
+
+        Returns:
+            list: Selected ``(x, y)`` coordinates.
+        """
         n = kwargs.pop("n", 1)
         figsize = kwargs.get("figsize", self.figsize)
         fig, ax = plt.subplots(figsize=figsize)
@@ -619,12 +894,19 @@ class Grid:
         return plt.ginput(n)
 
     def show(self, **kwargs):
-        """Show dataset
+        """Display the grid using :func:`rasterio.plot.show`.
 
         Args:
-            title (str, optional): Title of dataset. Default is `"DEM"`
-            figsize (tuple, optional): matplotlib figure size.
-
+            title (str, optional): Plot title. Defaults to ``self.title``.
+            figsize (tuple, optional): Figure size in inches.
+            transform (affine.Affine, optional): Geotransform for axis labels.
+            colorbar (bool, optional): Show colour bar. Default ``True``.
+            adjust (bool, optional): Automatically adjust layout.
+                Default ``False``.
+            ax (matplotlib.axes.Axes, optional): Existing axes. When provided,
+                the colour bar is suppressed.
+            show (bool, optional): Call ``plt.show()``. Default ``True``.
+            cmap (str, optional): Matplotlib colormap.
         """
         ax = kwargs.pop("ax", None)
         show = kwargs.pop("show", True)
@@ -656,22 +938,21 @@ class Grid:
 
 
 class BoolGrid(Grid):
-    """A class to store boolean data.
+    """Grid class specialised for boolean (binary) data.
+
+    Supports logical operations (``&``, ``|``, ``~``), morphological
+    operators (erosion, dilation, closing, opening), and connected-component
+    labelling.
 
     Args:
-        data (numpy.ma.MaskedArray): data as masked numpy array
-        cmap (str, optional): Colormap. Default is `"binary"`
-        title (str, optional): Title of dataset. Default is `"Bool"`
-        figsize (tuple, optional): matplotlib figure size.
-        driver (str, optional): Default is `"GTiff"`
-        dtype (str, optional): Default is `"float64"`
-        compress (str, optional): Default is `"lzw"`
-        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
-        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+        data (numpy.ma.MaskedArray or numpy.ndarray): Input boolean data.
+        cmap (str, optional): Colormap. Default ``"binary"``.
+        title (str, optional): Dataset title. Default ``"Bool"``.
+        **kwargs: Additional arguments passed to :class:`Grid`.
 
     Attributes:
-        unique_values (numpy.ndarray): array of unique values
-
+        count_true (int): Number of unmasked ``True`` entries.
+        count_false (int): Number of unmasked ``False`` entries.
     """
 
     _dtype = "bool"
@@ -683,6 +964,14 @@ class BoolGrid(Grid):
         self.title = kwargs.get("title", "Bool")
 
     def __and__(self, other):
+        """Element-wise logical AND.
+
+        Args:
+            other (BoolGrid or scalar): Operand.
+
+        Returns:
+            BoolGrid: Result of logical AND.
+        """
         if isinstance(other, BoolGrid):
             data = np.logical_and(self.data, other.data)
         else:
@@ -690,6 +979,14 @@ class BoolGrid(Grid):
         return self.clone(data)
 
     def __or__(self, other):
+        """Element-wise logical OR.
+
+        Args:
+            other (BoolGrid or scalar): Operand.
+
+        Returns:
+            BoolGrid: Result of logical OR.
+        """
         if isinstance(other, BoolGrid):
             data = np.logical_or(self.data, other.data)
         else:
@@ -697,32 +994,43 @@ class BoolGrid(Grid):
         return self.clone(data)
 
     def __neg__(self):
+        """Element-wise logical NOT (inversion).
+
+        Returns:
+            BoolGrid: Inverted boolean grid.
+        """
         return self.clone(np.logical_not(self.data))
 
     @property
     def count_true(self):
+        """int: Number of unmasked ``True`` values."""
         return np.sum(self._values).item()
 
     @property
     def count_false(self):
+        """int: Number of unmasked ``False`` values."""
         return len(self._values) - self.count_true
 
     def erosion(self, **kwargs):
-        """Binary erosion of True regions
+        """Binary erosion of ``True`` regions.
 
         Args:
-            n(int, optional): Number of iterations. Default 1
+            n (int, optional): Number of iterations. Default ``1``.
 
+        Returns:
+            BoolGrid: Eroded grid.
         """
         n = kwargs.pop("n", 1)
         return self.clone(ndimage.binary_erosion(self.filled, iterations=n), **kwargs)
 
     def dilation(self, **kwargs):
-        """Binary dilation of True regions
+        """Binary dilation of ``True`` regions.
 
         Args:
-            n(int, optional): Number of iterations. Default 1
+            n (int, optional): Number of iterations. Default ``1``.
 
+        Returns:
+            BoolGrid: Dilated grid.
         """
         n = kwargs.pop("n", 1)
         return self.clone(
@@ -731,35 +1039,46 @@ class BoolGrid(Grid):
         )
 
     def closing(self, **kwargs):
-        """Binary closing of True regions
+        """Binary closing (dilation then erosion) of ``True`` regions.
 
         Args:
-            n(int, optional): Number of iterations. Default 1
+            n (int, optional): Number of iterations. Default ``1``.
 
+        Returns:
+            BoolGrid: Closed grid.
         """
         n = kwargs.pop("n", 1)
         return self.clone(ndimage.binary_closing(self.filled, iterations=n), **kwargs)
 
     def opening(self, **kwargs):
-        """Binary opening of True regions
+        """Binary opening (erosion then dilation) of ``True`` regions.
 
         Args:
-            n(int, optional): Number of iterations. Default 1
+            n (int, optional): Number of iterations. Default ``1``.
 
+        Returns:
+            BoolGrid: Opened grid.
         """
         n = kwargs.pop("n", 1)
         return self.clone(ndimage.binary_opening(self.filled, iterations=n), **kwargs)
 
     def fill_holes(self, **kwargs):
-        """Binary fill of False holes in True regions"""
+        """Fill holes (``False`` regions completely surrounded by ``True``).
+
+        Returns:
+            BoolGrid: Grid with holes filled.
+        """
         return self.clone(ndimage.binary_fill_holes(self.filled), **kwargs)
 
     def remove_dots(self, **kwargs):
-        """Remove True regions with size in pixels smaller or equal to given value
+        """Remove ``True`` regions smaller than or equal to a given size.
 
         Args:
-            size(int, optional): Size in pixels of regions to remove. Default 1
+            size (int, optional): Maximum pixel count of regions to remove.
+                Default ``1``.
 
+        Returns:
+            BoolGrid: Grid with small regions removed.
         """
         labels, nb_labels = ndimage.label(self.filled)
         sizes = np.bincount(labels.ravel())
@@ -768,11 +1087,14 @@ class BoolGrid(Grid):
         return self.clone(mask_sizes[labels], **kwargs)
 
     def clear_boundary(self, **kwargs):
-        """Remove True regions touching the boundary
+        """Remove ``True`` regions that touch the grid boundary.
 
         Args:
-            use_mask(bool, optional): Also use mask boundary. Default True
+            use_mask (bool, optional): Also consider the data mask as a
+                boundary. Default ``True``.
 
+        Returns:
+            BoolGrid: Grid with boundary-touching regions removed.
         """
         if kwargs.pop("use_mask", True):
             # mask boundary
@@ -791,19 +1113,28 @@ class BoolGrid(Grid):
         return self.clone(labels > 1, **kwargs)
 
     def label(self, **kwargs):
+        """Label connected components of ``True`` regions.
+
+        Returns:
+            IntGrid: Labelled grid with component indices.
+        """
         labeled_array, num_features = ndimage.label(self.data.filled(False))
         return self.clone(
             labeled_array, astype=IntGrid, dtype="int32", nodata=0, **kwargs
         )
 
     def normalized(self, **kwargs):
-        """Returns normalized dataset to range (0,1)
+        """Return inverted-normalized grid to range ``[0, 1]``.
+
+        For boolean grids this produces ``1 - data`` as a :class:`FloatGrid`.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"NORM(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"NORM(…)"``.
 
+        Returns:
+            FloatGrid: Normalised float grid.
         """
         kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
         return self.clone(
@@ -815,23 +1146,19 @@ class BoolGrid(Grid):
 
 
 class IntGrid(Grid):
-    """A class to store discrete data.
+    """Grid class specialised for discrete (integer) data.
+
+    Supports integer division semantics (``//``) and majority / moving-average
+    filters.
 
     Args:
-        data (numpy.ma.MaskedArray): data as masked numpy array
-        cmap (str, optional): Colormap. Default is `"viridis"`
-        title (str, optional): Title of dataset. Default is `"IntGrid"`
-        figsize (tuple, optional): matplotlib figure size.
-        driver (str, optional): Default is `"GTiff"`
-        dtype (str, optional): Default is `"float64"`
-        nodata (float, optional): Default is `-9999.0`
-        compress (str, optional): Default is `"lzw"`
-        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
-        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+        data (numpy.ma.MaskedArray or numpy.ndarray): Input integer data.
+        cmap (str, optional): Colormap. Default ``"viridis"``.
+        title (str, optional): Dataset title. Default ``"IntGrid"``.
+        **kwargs: Additional arguments passed to :class:`Grid`.
 
     Attributes:
-        unique_values (numpy.ndarray): array of unique values
-
+        unique_values (numpy.ndarray): Sorted array of distinct unmasked values.
     """
 
     _dtype = "int"
@@ -843,6 +1170,14 @@ class IntGrid(Grid):
         self.title = kwargs.get("title", "IntGrid")
 
     def __truediv__(self, other):
+        """Element-wise integer (floor) division.
+
+        Args:
+            other (Grid or scalar): Divisor.
+
+        Returns:
+            IntGrid: Result as integer grid.
+        """
         if isinstance(other, Grid):
             data = self.data // other.data.astype(int)
         else:
@@ -850,6 +1185,11 @@ class IntGrid(Grid):
         return self.clone(data)
 
     def __rtruediv__(self, other):
+        """Element-wise reverse integer division (``other // self``).
+
+        Returns:
+            IntGrid: Result as integer grid.
+        """
         if isinstance(other, Grid):
             data = other.data.astype(int) // self.data
         else:
@@ -857,6 +1197,7 @@ class IntGrid(Grid):
         return self.clone(data)
 
     def __itruediv__(self, other):
+        """In-place element-wise integer division."""
         if isinstance(other, Grid):
             self.data //= other.data.astype(int)
         else:
@@ -865,11 +1206,14 @@ class IntGrid(Grid):
 
     @classmethod
     def example(cls, test=False):
-        """Get example data
+        """Load an example :class:`IntGrid` from bundled test data.
+
+        Args:
+            test (bool, optional): Use ``int.tif`` (small) when ``True``,
+                ``dem.tif`` otherwise. Default ``False``.
 
         Returns:
-            IntGrid: example int grid
-
+            IntGrid: Example integer grid.
         """
         datapath = importlib.resources.files("demtools.data")
         if test:
@@ -880,14 +1224,20 @@ class IntGrid(Grid):
 
     @property
     def unique_values(self):
+        """numpy.ndarray: Sorted unique unmasked values."""
         return np.unique(self._values)
 
     def counts(self, **kwargs):
-        """Count occurences of values in grid
+        """Count occurrences of each unique value in the grid.
 
         Args:
-            plot(bool, optional): If True, show bar plot, otherwise returns (values, counts)
+            plot (bool, optional): If ``True``, show a bar plot; otherwise
+                return ``(values, counts)``. Default ``False``.
+            **kwargs: Passed through to :func:`matplotlib.pyplot.bar` when
+                *plot* is ``True``.
 
+        Returns:
+            tuple or None: ``(values, counts)`` when *plot* is ``False``.
         """
         values, pos = np.unique(self._values, return_inverse=True)
         counts = np.bincount(pos)
@@ -898,11 +1248,17 @@ class IntGrid(Grid):
             return values, counts
 
     def remove_dots(self, **kwargs):
-        """Remove regions with size in pixels smaller or equal to given value
+        """Remove regions of a given value smaller than a size threshold.
+
+        For each distinct value, connected components smaller than *size*
+        pixels are replaced with the nodata value.
 
         Args:
-            size(int, optional): Size in pixels of regions to remove. Default 1
+            size (int, optional): Maximum pixel count of regions to remove.
+                Default ``1``.
 
+        Returns:
+            IntGrid: Grid with small regions removed.
         """
         size = kwargs.pop("size", 1)
         filled = self.filled
@@ -921,28 +1277,30 @@ class IntGrid(Grid):
         return self.clone(result, **kwargs)
 
     def moving_average(self, **kwargs):
-        """Returns moving window average
+        """Return moving-window average using integer division.
 
         Args:
-            win(numpy.ndarray, optional): Numpy array of zeros and ones define window size and filter.
-                Default is None
-            r(int, optional): Define win halfsize if win is None. Shape of win is (2*r+1, 2*r+1)
+            win (numpy.ndarray, optional): Binary window array. Default
+                ``None`` (creates a disk with radius *r*).
+            r (int, optional): Disk radius in pixels. Default ``5``.
 
+        Returns:
+            IntGrid: Moving-average grid (integer).
         """
         n_sum, n_count = self._kernel(**kwargs)
         return self.clone(n_sum // n_count, **kwargs)
 
     def majority_filter(self, **kwargs):
-        """Returns Majority filtered dataset
+        """Apply a majority (most-common-value) filter.
 
         Args:
-            size(int): size gives the shape that is taken from the input array,
-                at every element position, to define the input to the filter
-                function. Default 3
-            cmap (str, optional): Colormap. Default keep original.
-            stretch (bool, optional): Stretch colormap. Default keep original.
-            title (str, optional): Title of dataset. Default '"M(...)"'.
+            size (int, optional): Window size. Default ``3``.
+            cmap (str, optional): Colormap.
+            stretch (bool, optional): Stretch colormap.
+            title (str, optional): Dataset title. Default ``"M(…)"``.
 
+        Returns:
+            IntGrid: Majority-filtered grid.
         """
 
         def most_common(a):
@@ -954,13 +1312,15 @@ class IntGrid(Grid):
         return self.clone(filtered, **kwargs)
 
     def normalized(self, **kwargs):
-        """Returns normalized dataset to range (0,1)
+        """Return min-max normalised grid to range ``[0, 1]``.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"NORM(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"NORM(…)"``.
 
+        Returns:
+            FloatGrid: Normalised float grid.
         """
         kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
         return self.clone(
@@ -971,6 +1331,15 @@ class IntGrid(Grid):
         )
 
     def polygonize(self, file=None):
+        """Vectorise connected regions of equal value.
+
+        Args:
+            file (str, optional): Path to write GeoJSON output. If ``None``,
+                returns a list of :class:`shapely.geometry.shape` objects.
+
+        Returns:
+            list or None: List of Shapely geometries when *file* is ``None``.
+        """
         source = self.clone(self.data.astype("int32"))
         if file is not None:
             features = []
@@ -997,25 +1366,24 @@ class IntGrid(Grid):
 
 
 class FloatGrid(Grid):
-    """A class to store continuos data.
+    """Grid class specialised for continuous (floating-point) data.
+
+    Provides potential-field derivatives (:meth:`dx`, :meth:`dy`, :meth:`dz`,
+    :meth:`thd`, :meth:`tga`, :meth:`theta`, :meth:`nthd`, :meth:`tilt`),
+    upward continuation, resampling, and various filters.
 
     Args:
-        data (numpy.ma.MaskedArray): data as masked numpy array
-        cmap (str, optional): Colormap. Default is `"viridis"`
-        stretch (bool, optional): Stretch colormap to 2-98 percentil. Default is `True`
-        title (str, optional): Title of dataset. Default is `"FloatGrid"`
-        figsize (tuple, optional): matplotlib figure size.
-        driver (str, optional): Default is `"GTiff"`
-        dtype (str, optional): Default is `"float64"`
-        nodata (float, optional): Default is `-9999.0`
-        compress (str, optional): Default is `"lzw"`
-        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
-        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+        data (numpy.ma.MaskedArray or numpy.ndarray): Input float data.
+        cmap (str, optional): Colormap. Default ``"viridis"``.
+        stretch (bool, optional): Stretch colormap to 2–98 percentile.
+            Default ``True``.
+        title (str, optional): Dataset title. Default ``"FloatGrid"``.
+        **kwargs: Additional arguments passed to :class:`Grid`.
 
     Attributes:
-        min (float): minimum of data
-        max (float): maximum of data
-
+        min (float): Minimum unmasked value.
+        max (float): Maximum unmasked value.
+        mean (float): Mean of unmasked values.
     """
 
     _dtype = "float"
@@ -1029,29 +1397,32 @@ class FloatGrid(Grid):
 
     @property
     def min(self):
+        """float: Minimum of unmasked values."""
         return self._values.min().item()
 
     @property
     def max(self):
+        """float: Maximum of unmasked values."""
         return self._values.max().item()
 
     @property
     def mean(self):
+        """float: Mean of unmasked values."""
         return self._values.mean().item()
 
     @cached_property
     def _dx(self):
-        """Horizontal derivative dx as numpy array"""
+        """numpy.ndarray: Horizontal derivative in the x-direction."""
         return derivx(self.filled, self.meta["transform"].a)
 
     @cached_property
     def _dy(self):
-        """Horizontal derivative dy as numpy array"""
+        """numpy.ndarray: Horizontal derivative in the y-direction."""
         return derivy(self.filled, self.meta["transform"].e)
 
     @cached_property
     def _dz(self):
-        """Vertical derivative dz as numpy array"""
+        """numpy.ndarray: Vertical derivative computed via FFT."""
         dz = derivz(
             self.data.filled(
                 self._values.mean()
@@ -1064,17 +1435,20 @@ class FloatGrid(Grid):
 
     @property
     def _tga(self):
-        """Total gradient amplitude as numpy array"""
+        """numpy.ndarray: Total gradient amplitude
+        :math:`\\sqrt{dx^2 + dy^2 + dz^2}`."""
         return np.sqrt(self._dx**2 + self._dy**2 + self._dz**2)
 
     def normalized(self, **kwargs):
-        """Returns normalized dataset to range (0,1)
+        """Return min-max normalised grid to range ``[0, 1]``.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"NORM(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"NORM(…)"``.
 
+        Returns:
+            FloatGrid: Normalised float grid.
         """
         kwargs["title"] = kwargs.get("title", f"NORM({self.title})")
         return self.clone(
@@ -1084,13 +1458,15 @@ class FloatGrid(Grid):
         )
 
     def inverted(self, **kwargs):
-        """Returns inverted dataset
+        """Return inverted dataset (``max - data + min``).
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"NORM(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"INV(…)"``.
 
+        Returns:
+            FloatGrid: Inverted float grid.
         """
         kwargs["title"] = kwargs.get("title", f"INV({self.title})")
         return self.clone(
@@ -1098,28 +1474,33 @@ class FloatGrid(Grid):
         )
 
     def moving_average(self, **kwargs):
-        """Returns moving window average
+        """Return moving-window average.
 
         Args:
-            win(numpy.ndarray, optional): Numpy array of zeros and ones define window size and filter.
-                Default is None
-            r(int, optional): Define win halfsize if win is None. Shape of win is (2*r+1, 2*r+1)
+            win (numpy.ndarray, optional): Binary window array. Default
+                ``None`` (creates a disk with radius *r*).
+            r (int, optional): Disk radius in pixels. Default ``5``.
 
+        Returns:
+            FloatGrid: Moving-average grid.
         """
         n_sum, n_count = self._kernel(**kwargs)
         return self.clone(n_sum / n_count, **kwargs)
 
     def digitize(self, **kwargs):
-        """Return the IntGrid with indices of the bins to which each value belongs
+        """Bin values into equally spaced bins and return bin indices.
 
         Args:
-            bins (int or sequence of scalars or str, optional): If bins is an int,
-                it defines the number of equal-width bins in the given range. If
-                bins is a sequence, it defines the bin edges, including the
-                rightmost edge, allowing for non-uniform bin widths. If string,
-                see np.histogram_bin_edges. Default `auto`
-            cmap (str, optional): Colormap. Default keep original.
-            title (str, optional): Title of dataset. Default '"DIG"'.
+            bins (int or sequence or str, optional): Bin specification.
+                An integer defines the number of equal-width bins; a sequence
+                defines bin edges; a string selects a
+                :func:`numpy.histogram_bin_edges` method.
+                Default ``"auto"``.
+            cmap (str, optional): Colormap.
+            title (str, optional): Dataset title. Default ``"DIG(…)"``.
+
+        Returns:
+            IntGrid: Grid of bin indices.
         """
         bins = np.histogram_bin_edges(
             self._values,
@@ -1133,15 +1514,18 @@ class FloatGrid(Grid):
         return self.clone(data, mask=self._mask, astype=IntGrid, **kwargs)
 
     def resample(self, scale, resampling="average", **kwargs):
-        """Returns resampled dataset
+        """Resample the grid to a coarser or finer resolution.
 
         Args:
-            scale (float): Resampling scale. New resolution is scale multiple
-                of original resolution
-            resampling (str, optional): Resampling algorithm. One of 'nearest',
-                'bilinear', 'cubic', 'cubic_spline', 'lanczos', 'average',
-                'mode', and 'gauss'. Default 'average'.
+            scale (float): Rescaling factor. Values > 1 coarsen the grid;
+                values < 1 refine it.
+            resampling (str, optional): Resampling algorithm. One of
+                ``"nearest"``, ``"bilinear"``, ``"cubic"``,
+                ``"cubic_spline"``, ``"lanczos"``, ``"average"``,
+                ``"mode"``, ``"gauss"``. Default ``"average"``.
 
+        Returns:
+            FloatGrid: Resampled grid.
         """
         algs = {
             "nearest": Resampling.nearest,
@@ -1169,52 +1553,61 @@ class FloatGrid(Grid):
         return self.clone(data, meta=meta, **kwargs)
 
     def dx(self, **kwargs):
-        """Returns horizontal derivative dx
+        """Return the first horizontal derivative in the x-direction.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"dx(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"dx(…)"``.
 
+        Returns:
+            FloatGrid: Derivative grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dx({self.title})")
         return self.clone(self._dx, astype=FloatGrid, **kwargs)
 
     def dy(self, **kwargs):
-        """Returns horizontal derivative dy
+        """Return the first horizontal derivative in the y-direction.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"dy(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"dy(…)"``.
 
+        Returns:
+            FloatGrid: Derivative grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dy({self.title})")
         return self.clone(self._dy, astype=FloatGrid, **kwargs)
 
     def dz(self, **kwargs):
-        """Returns vertical derivative dz
+        """Return the first vertical derivative computed via FFT.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"dz(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"dz(…)"``.
 
+        Returns:
+            FloatGrid: Derivative grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"dz({self.title})")
         return self.clone(self._dz, astype=FloatGrid, **kwargs)
 
     def upcont(self, h, **kwargs):
-        """Returns upward continuation
+        """Upward-continue the potential-field grid to a given height.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"up(...)"'.
+            h (float): Height (in CRS units) to continue the field to.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"up(…)"``.
 
+        Returns:
+            FloatGrid: Upward-continued grid.
         """
         up = upcontinue(
             self.filled, self.meta["transform"].a, self.meta["transform"].e, h
@@ -1225,13 +1618,16 @@ class FloatGrid(Grid):
         return self.clone(up, astype=FloatGrid, **kwargs)
 
     def thd(self, **kwargs):
-        """Returns total horizontal derivative
+        """Return the total horizontal derivative
+        :math:`\\sqrt{dx^2 + dy^2}`.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"THD(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"THD(…)"``.
 
+        Returns:
+            FloatGrid: THD grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"THD({self.title})")
@@ -1239,13 +1635,16 @@ class FloatGrid(Grid):
         return self.clone(thd, astype=FloatGrid, **kwargs)
 
     def tga(self, **kwargs):
-        """Returns total gradient amplitude (also called the analytic signal)
+        """Return the total gradient amplitude (analytic signal)
+        :math:`\\sqrt{dx^2 + dy^2 + dz^2}`.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"TGA(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"TGA(…)"``.
 
+        Returns:
+            FloatGrid: TGA grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"TGA({self.title})")
@@ -1253,13 +1652,18 @@ class FloatGrid(Grid):
         return self.clone(tga, astype=FloatGrid, **kwargs)
 
     def theta(self, **kwargs):
-        """Returns theta - total horizontal derivative divided by the analytical signal
+        r"""Return :math:`\\theta = \\frac{THD}{\\text{TGA}}`.
+
+        The ratio of the total horizontal derivative to the total gradient
+        amplitude.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"Theta(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"Theta(…)"``.
 
+        Returns:
+            FloatGrid: Theta grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"Theta({self.title})")
@@ -1268,13 +1672,18 @@ class FloatGrid(Grid):
         return self.clone(thd / tga, astype=FloatGrid, **kwargs)
 
     def nthd(self, **kwargs):
-        """Returns normalized total horizontal derivative
+        """Return the normalised total horizontal derivative (NTHD).
+
+        :math:`\\text{NTHD} = \\arctan\\left(
+        \\frac{THD}{|dz|}\\right)`.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"NTHD(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"NTHD(…)"``.
 
+        Returns:
+            FloatGrid: NTHD grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"NTHD({self.title})")
@@ -1286,13 +1695,15 @@ class FloatGrid(Grid):
         )
 
     def tilt(self, **kwargs):
-        """Returns tilt angle in radians
+        """Return the tilt angle :math:`\\arctan(dz / THD)` in radians.
 
         Args:
-            cmap (str, optional): Colormap. Default `"bone_r"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"Tilt(...)"'.
+            cmap (str, optional): Colormap. Default ``"bone_r"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"Tilt(…)"``.
 
+        Returns:
+            FloatGrid: Tilt-angle grid.
         """
         kwargs["cmap"] = kwargs.get("cmap", "bone_r")
         kwargs["title"] = kwargs.get("title", f"Tilt({self.title})")
@@ -1300,14 +1711,17 @@ class FloatGrid(Grid):
         return self.clone(np.arctan2(self._dz, thd), astype=FloatGrid, **kwargs)
 
     def gaussian_filter(self, **kwargs):
-        """Returns Gaussian filtered dataset
+        """Apply a Gaussian filter.
 
         Args:
-            sigma(float): Standard deviation for Gaussian kernel. Default 1
-            cmap (str, optional): Colormap. Default keep original.
-            stretch (bool, optional): Stretch colormap. Default keep original.
-            title (str, optional): Title of dataset. Default '"G(...)"'.
+            sigma (float, optional): Standard deviation in pixels.
+                Default ``1``.
+            cmap (str, optional): Colormap.
+            stretch (bool, optional): Stretch colormap.
+            title (str, optional): Dataset title. Default ``"G(…)"``.
 
+        Returns:
+            FloatGrid: Filtered grid.
         """
         sigma = kwargs.get("sigma", 1)
         filtered = ndimage.gaussian_filter(self.data.filled(np.nan), sigma)
@@ -1315,15 +1729,17 @@ class FloatGrid(Grid):
         return self.clone(filtered, mask=np.isnan(filtered) | self._mask, **kwargs)
 
     def median_filter(self, **kwargs):
-        """Returns median filtered dataset
+        """Apply a median filter.
 
         Args:
-            size(int): A scalar or a list of length 2, giving the size
-                of the median filter window. Default 3
-            cmap (str, optional): Colormap. Default keep original.
-            stretch (bool, optional): Stretch colormap. Default keep original.
-            title (str, optional): Title of dataset. Default '"M(...)"'.
+            size (int or list, optional): Window size (scalar or ``[h, w]``).
+                Default ``3``.
+            cmap (str, optional): Colormap.
+            stretch (bool, optional): Stretch colormap.
+            title (str, optional): Dataset title. Default ``"M(…)"``.
 
+        Returns:
+            FloatGrid: Filtered grid.
         """
         size = kwargs.get("size", 3)
         filtered = ndimage.median_filter(self.data.filled(np.nan), size)
@@ -1331,11 +1747,18 @@ class FloatGrid(Grid):
         return self.clone(filtered, mask=np.isnan(filtered) | self._mask, **kwargs)
 
     def overlay(self, over, invert=False):
-        """Create RGBimage of overlied datasets in HSV space
+        """Create an :class:`RGBimage` by overlaying two datasets in HSV space.
+
+        The current grid is used for hue/saturation and *over* for value
+        (brightness).
 
         Args:
-            invert(bool): Default False
+            over (Grid): Grid providing the value (brightness) channel.
+            invert (bool, optional): Invert the brightness channel.
+                Default ``False``.
 
+        Returns:
+            RGBimage: Overlaid RGB image.
         """
         img_array = plt.get_cmap(self.cmap)(self.normalized().data)
         hsv = clr.rgb_to_hsv(img_array[:, :, :3])
@@ -1352,16 +1775,23 @@ class FloatGrid(Grid):
         )
 
     def show(self, **kwargs):
-        """Show dataset
+        """Display the grid with optional contour overlay and stretch.
 
         Args:
-            contour(bool): Show data as contours. Default `False`
-            contour_label_kws(dict): Default None
-            cmap (str, optional): Colormap. Default is `"terrain"`
-            stretch (bool, optional): Stretch colormap. Default is `False`
-            title (str, optional): Title of dataset. Default is `"DEM"`
-            figsize (tuple, optional): matplotlib figure size.
-
+            contour (bool, optional): Overlay contour lines.
+                Default ``False``.
+            contour_label_kws (dict, optional): Keyword args for contour
+                labels.
+            stretch (bool, optional): Stretch displayed range to 2–98
+                percentile. Defaults to ``self.stretch``.
+            title (str, optional): Plot title. Defaults to ``self.title``.
+            figsize (tuple, optional): Figure size in inches.
+            transform (affine.Affine, optional): Geotransform.
+            colorbar (bool, optional): Show colour bar. Default ``True``.
+            adjust (bool, optional): Auto-adjust layout. Default ``False``.
+            ax (matplotlib.axes.Axes, optional): Existing axes.
+            show (bool, optional): Call ``plt.show()``. Default ``True``.
+            cmap (str, optional): Colormap.
         """
         contour = kwargs.pop("contour", False)
         contour_label_kws = kwargs.pop("contour_label_kws", None)
@@ -1403,29 +1833,23 @@ class FloatGrid(Grid):
 
 
 class DEMGrid(FloatGrid):
-    """A class to store digital elevation model.
+    """Grid class specialised for digital elevation models.
+
+    Inherits all :class:`FloatGrid` functionality and adds
+    terrain-specific methods: hillshade, shaded relief, Topographic
+    Position Index (TPI), pit detection, and sink filling.
 
     Args:
-        data (numpy.ma.MaskedArray): data as masked numpy array
-        cmap (str, optional): Colormap. Default is `"terrain"`
-        stretch (bool, optional): Stretch colormap to 2-98 percentil. Default is `False`
-        title (str, optional): Title of dataset. Default is `"DEM"`
-        figsize (tuple, optional): matplotlib figure size.
-        driver (str, optional): Default is `"GTiff"`
-        dtype (str, optional): Default is `"float64"`
-        nodata (float, optional): Default is `-9999.0`
-        compress (str, optional): Default is `"lzw"`
-        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
-        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
-
-    Attributes:
-        min (float): minimum of data
-        max (float): maximum of data
+        data (numpy.ma.MaskedArray or numpy.ndarray): Input elevation data.
+        cmap (str, optional): Colormap. Default ``"terrain"``.
+        stretch (bool, optional): Stretch colormap to 2–98 percentile.
+            Default ``False``.
+        title (str, optional): Dataset title. Default ``"DEM"``.
+        **kwargs: Additional arguments passed to :class:`FloatGrid`.
 
     Example:
-        >>> d = DEMGrid.from_examples('smalldem')
-        >>> d.show()
-
+        >>> dem = DEMGrid.example(test=True)
+        >>> dem.show()
     """
 
     _dtype = "float"
@@ -1438,7 +1862,46 @@ class DEMGrid(FloatGrid):
         self.title = kwargs.get("title", "DEM")
 
     @classmethod
+    def from_serve5g(
+        cls, xmin, ymin, width=None, buffer=None, api_url="http://localhost:8088"
+    ):
+        """Read a :class:`DEMGrid` from a serve5g REST API.
+
+        Args:
+            xmin (float): x coordinate of lower left corner
+            ymin (float): y coordinate of lower left corner
+            width (float, optional): Size of clipped region in meters
+            buffer (float, optional): size of padding in meters
+            api_url (str, optional): URL of REST API. Default is ``http://localhost:8088``
+
+        Returns:
+            DEMGrid: New DEM grid.
+        """
+        if width is not None:
+            if buffer is not None:
+                url = f"{api_url}/{xmin}/{ymin}/{width}/{buffer}"
+            else:
+                url = f"{api_url}/{xmin}/{ymin}/{width}"
+        else:
+            url = f"{api_url}/{xmin}/{ymin}"
+        print("Getting data...")
+        with requests.Session() as s:
+            response = s.get(url, stream=True)
+            with MemoryFile(response.raw) as memfile:
+                return DEMGrid.from_file(memfile)
+
+    @classmethod
     def from_pysheds(cls, dem):
+        """Create a :class:`DEMGrid` from a ``pysheds`` ``Grid`` object.
+
+        Args:
+            dem (pysheds.Grid): A pysheds grid instance with ``data``,
+                ``nodata``, ``affine``, ``shape``, ``crs``, and ``dtype``
+                attributes.
+
+        Returns:
+            DEMGrid: New DEM grid.
+        """
         data = ma.array(
             dem.data,
             mask=np.array(dem.data) == dem.nodata,
@@ -1456,11 +1919,14 @@ class DEMGrid(FloatGrid):
 
     @classmethod
     def example(cls, test=False):
-        """Get example dem data
+        """Load an example :class:`DEMGrid` from bundled data.
+
+        Args:
+            test (bool, optional): Use ``testdem.tif`` (32×32) when
+                ``True``, ``dem.tif`` otherwise. Default ``False``.
 
         Returns:
-            DEMGrid: digital elevation model
-
+            DEMGrid: Example DEM.
         """
         datapath = importlib.resources.files("demtools") / "data"
         if test:
@@ -1470,15 +1936,18 @@ class DEMGrid(FloatGrid):
         return cls.from_file(fname)
 
     def hillshade(self, **kwargs):
-        """Returns hillshade
+        """Return a hillshade (shaded relief) grid.
 
         Args:
-            azdeg(float): The azimuth (0-360, degrees clockwise from North) of
-                the light source. Default 150
-            altdeg(float): The altitude (0-90, degrees up from horizontal) of
-                the light source. Default 40
-            vert_ezag(float): The amount to exaggerate the elevation values by
-                when calculating illumination
+            azdeg (float, optional): Light azimuth in degrees clockwise
+                from north. Default ``150``.
+            altdeg (float, optional): Light altitude in degrees above the
+                horizon. Default ``40``.
+            vert_exag (float, optional): Vertical exaggeration factor.
+                Default ``1``.
+
+        Returns:
+            FloatGrid: Hillshade grid.
         """
         vert_exag = kwargs.get("vert_exag", 1)
         azdeg = kwargs.get("azdeg", 150)
@@ -1497,17 +1966,21 @@ class DEMGrid(FloatGrid):
         return self.clone(hs, astype=FloatGrid, **kwargs)
 
     def shade(self, **kwargs):
-        """Show combined colormapped data values with an illumination intensity map
+        """Return an RGB shaded-relief image.
+
+        Combines the colormapped elevation with hillshading in HSV space.
 
         Args:
-            azdeg(float): The azimuth (0-360, degrees clockwise from North) of
-                the light source. Default 150
-            altdeg(float): The altitude (0-90, degrees up from horizontal) of
-                the light source. Default 40
-            vert_ezag(float): The amount to exaggerate the elevation values by
-                when calculating illumination
-            blend_mode(str): The type of blending. Default `"overlay"`
+            azdeg (float, optional): Light azimuth. Default ``150``.
+            altdeg (float, optional): Light altitude. Default ``40``.
+            vert_exag (float, optional): Vertical exaggeration.
+                Default ``1``.
+            blend_mode (str, optional): Blending mode. Default ``"overlay"``.
+            fraction (float, optional): Fraction of hillshade to apply.
+                Default ``1``.
 
+        Returns:
+            RGBimage: Shaded-relief RGB image.
         """
         azdeg = kwargs.get("azdeg", 150)
         altdeg = kwargs.get("altdeg", 40)
@@ -1527,15 +2000,21 @@ class DEMGrid(FloatGrid):
         )
 
     def tpi(self, **kwargs):
-        """Calculate Topographic Position Index (TPI)
+        """Calculate the Topographic Position Index (TPI).
+
+        TPI = spot height – mean neighbourhood height (with a disc-shaped
+        neighbourhood). The cell at the centre of the window is excluded.
 
         Args:
-            win(numpy.array, optional): structural element. Default disk
-            r(int, optional): radius of disk structural element. Default `5`
-            cmap (str, optional): Colormap. Default `"seismic"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"TPI(...)"'.
+            win (numpy.ndarray, optional): Custom binary structural element.
+                Default ``None`` (creates a disk with radius *r*).
+            r (int, optional): Disk radius in pixels. Default ``5``.
+            cmap (str, optional): Colormap. Default ``"seismic"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"TPI(…)"``.
 
+        Returns:
+            FloatGrid: TPI grid.
         """
         n_sum, n_count = self._kernel(exclude_centre=True, **kwargs)
         # this is TPI (spot height – average neighbourhood height)
@@ -1547,15 +2026,21 @@ class DEMGrid(FloatGrid):
         )
 
     def tpi_fft(self, **kwargs):
-        """Calculate Topographic Position Index (TPI) using FFT
+        """Calculate the Topographic Position Index using FFT convolution.
+
+        Faster than :meth:`tpi` for large windows. The centre cell is
+        excluded from the neighbourhood sum.
 
         Args:
-            win(numpy.array, optional): operation window. Default disk
-            r(int, optional): radius of disk structural element. Default `5`
-            cmap (str, optional): Colormap. Default `"seismic"`.
-            stretch (bool, optional): Stretch colormap. Default `True`.
-            title (str, optional): Title of dataset. Default '"TPI(...)"'.
+            win (numpy.ndarray, optional): Custom binary operation window.
+                Default ``None`` (creates a disk with radius *r*).
+            r (int, optional): Disk radius in pixels. Default ``5``.
+            cmap (str, optional): Colormap. Default ``"seismic"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"TPI(…)"``.
 
+        Returns:
+            FloatGrid: TPI grid.
         """
         win = kwargs.get("win", None)
         if win is None:
@@ -1582,6 +2067,19 @@ class DEMGrid(FloatGrid):
         )
 
     def tpi_cube(self, **kwargs):
+        """Compute TPI at multiple scales and return as a :class:`FeatureSet`.
+
+        The resulting feature set has one column per scale, allowing
+        multi-scale terrain analysis.
+
+        Args:
+            n (int, optional): Number of scales. Default ``20``.
+            scale (float, optional): Base-2 logarithmic scaling factor.
+                Default ``3.322``.
+
+        Returns:
+            FeatureSet: Multi-scale TPI features.
+        """
         n = kwargs.pop("n", 20)
         scale = kwargs.pop("scale", 3.322)
         steps = np.arange(0, (n - 1) * 2**scale + 1, 2**scale, dtype=int)
@@ -1601,6 +2099,16 @@ class DEMGrid(FloatGrid):
         )
 
     def pits(self, size=3, **kwargs):
+        """Detect pits (cells lower than all neighbours in a square ring).
+
+        Uses a ``(size, size)`` square ring kernel (centre excluded).
+
+        Args:
+            size (int, optional): Kernel size. Default ``3``.
+
+        Returns:
+            BoolGrid: Boolean grid where ``True`` indicates pits.
+        """
         win = np.ones((size, size))
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
         d = self.filled
@@ -1608,6 +2116,14 @@ class DEMGrid(FloatGrid):
         return self.clone(res, astype=BoolGrid, **kwargs)
 
     def pits2(self, size=3, **kwargs):
+        """Detect pits using a kernel that excludes only the centre cell.
+
+        Args:
+            size (int, optional): Kernel size. Default ``3``.
+
+        Returns:
+            BoolGrid: Boolean grid where ``True`` indicates pits.
+        """
         win = np.ones((size, size))
         win[size // 2, size // 2] = 0
         d = self.filled
@@ -1615,6 +2131,16 @@ class DEMGrid(FloatGrid):
         return self.clone(res, astype=BoolGrid, **kwargs)
 
     def flats(self, size=3, **kwargs):
+        """Detect flat cells (equal to the minimum in a square ring).
+
+        Uses a ``(size, size)`` square ring kernel.
+
+        Args:
+            size (int, optional): Kernel size. Default ``3``.
+
+        Returns:
+            BoolGrid: Boolean grid where ``True`` indicates flat cells.
+        """
         win = np.ones((size, size))
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
         d = self.filled
@@ -1622,6 +2148,14 @@ class DEMGrid(FloatGrid):
         return self.clone(res, astype=BoolGrid, **kwargs)
 
     def flats2(self, size=3, **kwargs):
+        """Detect flat cells using a kernel that excludes only the centre.
+
+        Args:
+            size (int, optional): Kernel size. Default ``3``.
+
+        Returns:
+            BoolGrid: Boolean grid where ``True`` indicates flat cells.
+        """
         win = np.ones((size, size))
         win[size // 2, size // 2] = 0
         d = self.filled
@@ -1629,6 +2163,19 @@ class DEMGrid(FloatGrid):
         return self.clone(res, astype=BoolGrid, **kwargs)
 
     def fill_pits(self, size=3, eps=0, **kwargs):
+        """Fill pits by raising cells to the minimum of their neighbourhood.
+
+        Iteratively raises pit cells to the ring-minimum value plus an
+        optional epsilon.
+
+        Args:
+            size (int, optional): Kernel size. Default ``3``.
+            eps (float, optional): Small constant added to the fill value.
+                Default ``0``.
+
+        Returns:
+            FloatGrid: Pit-filled DEM.
+        """
         win = np.ones((size, size))
         # win[size // 2, size // 2] = 0
         win[1:-1, 1:-1] = np.zeros((size - 2, size - 2))
@@ -1638,6 +2185,14 @@ class DEMGrid(FloatGrid):
         return self.clone(d, **kwargs)
 
     def sink_points(self, size):
+        """Return the coordinates of sink (pit) centres.
+
+        Args:
+            size (int): Kernel size for pit detection.
+
+        Returns:
+            list: ``(row, col)`` tuples of sink centre positions.
+        """
         # locs = self.fill_pits(3).fill_pits(5).pits(7).fill_holes().opening().closing()
         locs = self.pits2(size)  # .fill_holes().opening().closing()
         labeled_array, num_features = ndimage.label(locs.filled)
@@ -1647,19 +2202,19 @@ class DEMGrid(FloatGrid):
 
 
 class RGBimage:
-    """A class to store RGB dataset.
+    """A class to store and display 3-band RGB imagery.
 
     Args:
-        data (numpy.array): data as 3d numpy array
-        title (str, optional): Title of dataset. Default is `"RGB"`
-        figsize (tuple, optional): matplotlib figure size.
-        driver (str, optional): Default is `"GTiff"`
-        dtype (str, optional): Default is `"float64"`
-        nodata (float, optional): Default is `-9999.0`
-        compress (str, optional): Default is `"lzw"`
-        crs (rasterio.crs.CRS, optional): Default is `CRS.from_epsg(3857)`
-        transform (affine.Affine, optional): Default is `Affine(1.0, 0.0, 0, 0.0, -1.0, 0)`
+        rgb (numpy.ndarray): 3-D array of shape ``(3, height, width)``.
+        title (str, optional): Dataset title. Default ``"RGB"``.
+        figsize (tuple, optional): Figure size in inches.
+        **meta: Rasterio metadata keys (``crs``, ``transform``, etc.).
 
+    Attributes:
+        data (numpy.ndarray): The 3-band raster data.
+        title (str): Dataset title.
+        figsize (tuple): Figure size.
+        meta (dict): Rasterio-compatible metadata.
     """
 
     def __init__(self, rgb, **kwargs):
@@ -1685,22 +2240,23 @@ class RGBimage:
         ), "Wrong metadata !"
 
     def write_tif(self, filename):
-        """Write dataset to file
+        """Write RGB data to a GeoTIFF file.
 
         Args:
-            filename (str): filename
-
+            filename (str): Output file path.
         """
         with rio.open(filename, "w", **self.meta) as dst:
             dst.write(self.data)
 
     def show(self, **kwargs):
-        """Show RGB dataset
+        """Display the RGB image using :func:`rasterio.plot.show`.
 
         Args:
-            title (str, optional): Title of dataset. Default is `"DEM"`
-            figsize (tuple, optional): matplotlib figure size.
-
+            title (str, optional): Plot title. Defaults to ``self.title``.
+            figsize (tuple, optional): Figure size in inches.
+            transform (affine.Affine, optional): Geotransform for axis labels.
+            ax (matplotlib.axes.Axes, optional): Existing axes.
+            show (bool, optional): Call ``plt.show()``. Default ``True``.
         """
         ax = kwargs.pop("ax", None)
         show = kwargs.pop("show", True)
@@ -1721,14 +2277,29 @@ class RGBimage:
 
 
 class FeatureSet:
-    """A class to store ML features.
+    """A class to store and cluster multi-dimensional feature data.
+
+    Designed for multi-scale TPI feature vectors (rows = unmasked raster
+    cells, columns = scales). Supports K-means clustering, hierarchical
+    aggregation, and grid reconstruction.
 
     Args:
-        data (numpy.array): data as 2d numpy array. Number of rows
-            corresponds to valid raster cells.
-        mask (numpy.array): boolean array mask
-        meta (dict): rasterio metadata
-        use_grad (bool, optional): Use gradient of data. Default False
+        data (numpy.ndarray): 2-D array of shape ``(n_cells, n_features)``.
+        mask (numpy.ndarray): Boolean mask of the original raster.
+        meta (dict): Rasterio metadata for grid reconstruction.
+        feature_coords (numpy.ndarray, optional): 1-D array of coordinates
+            for each feature column. Default ``np.arange(n_features)``.
+        use_grad (bool, optional): Replace features with their gradient
+            along the feature axis. Default ``False``.
+        do_cluster (bool, optional): Run clustering immediately.
+            Default ``True``.
+        **kwargs: Passed to :meth:`cluster`.
+
+    Attributes:
+        data (numpy.ndarray): Feature array.
+        clusters (numpy.ndarray): Cluster assignments from K-means.
+        centers (numpy.ndarray): K-means cluster centres.
+        labels (numpy.ndarray): Final labels after hierarchical aggregation.
     """
 
     def __init__(self, data, mask, meta, **kwargs):
@@ -1748,6 +2319,18 @@ class FeatureSet:
             self.cluster(**kwargs)
 
     def cluster(self, **kwargs):
+        """Run K-means followed by hierarchical aggregation.
+
+        Args:
+            model (object, optional): Pre-fitted clustering model with
+                ``predict`` and ``cluster_centers_`` attributes.
+                Default ``None`` (creates a :class:`KMeans` instance).
+            n_kmeans (int, optional): Number of K-means clusters.
+                Default ``256``.
+            random_state (int, optional): Random seed. Default ``42``.
+            init (str, optional): Initialisation method. Default
+                ``"k-means++"``.
+        """
         model = kwargs.get("model", None)
         if model is None:
             print("Calculating initial clusters... ")
@@ -1763,6 +2346,17 @@ class FeatureSet:
         print("Done.")
 
     def batch_cluster(self, **kwargs):
+        """Run mini-batch K-means for large datasets.
+
+        Args:
+            n_kmeans (int, optional): Number of K-means clusters.
+                Default ``256``.
+            batch_size (int, optional): Mini-batch size. Default ``1024``.
+            n_init (str or int, optional): Number of initialisations.
+                Default ``"auto"``.
+            bs (int, optional): Chunk size for partial fit.
+                Default ``1000000``.
+        """
         print("Calculating initial clusters... ")
         kmeans = MiniBatchKMeans(
             n_clusters=kwargs.get("n_kmeans", 256),
@@ -1781,6 +2375,12 @@ class FeatureSet:
         print("Done.")
 
     def dendrogram(self, **kwargs):
+        """Display a dendrogram of the cluster centres.
+
+        Args:
+            metric (str, optional): Distance metric. Default ``"euclidean"``.
+            linkage (str, optional): Linkage method. Default ``"ward"``.
+        """
         Z = hierarchy.linkage(
             self.centers,
             metric=kwargs.get("metric", "euclidean"),
@@ -1790,6 +2390,14 @@ class FeatureSet:
         plt.show()
 
     def aggclusters(self, **kwargs):
+        """Aggregate K-means clusters via hierarchical clustering.
+
+        Args:
+            n_clusters (int, optional): Target number of aggregated clusters.
+                Default ``7``.
+            metric (str, optional): Distance metric. Default ``"euclidean"``.
+            linkage (str, optional): Linkage method. Default ``"ward"``.
+        """
         hierarchical_cluster = AgglomerativeClustering(
             n_clusters=kwargs.get("n_clusters", 7),
             metric=kwargs.get("metric", "euclidean"),
@@ -1801,10 +2409,16 @@ class FeatureSet:
             self.labels[self.clusters == ix] = agg[ix]
 
     def labels_average(self):
+        """Compute the mean feature vector per aggregated label.
+
+        Returns:
+            numpy.ndarray: Array of shape ``(n_labels, n_features)``.
+        """
         cids = np.unique(self.labels)
         return np.array([self.data[self.labels == c, :].mean(axis=0) for c in cids])
 
     def sort_label_integrals(self):
+        """Sort aggregated labels by the integral (area) of their mean curve."""
         cids = np.unique(self.labels)
         labels = self.labels.copy()
         six = np.argsort(np.trapezoid(self.labels_average()))
@@ -1813,6 +2427,14 @@ class FeatureSet:
         self.labels = labels
 
     def plot_averages(self, clusters=False, cmap=None):
+        """Plot the mean feature vectors for each cluster or label.
+
+        Args:
+            clusters (bool, optional): Plot K-means cluster centres instead
+                of aggregated labels. Default ``False``.
+            cmap (matplotlib.colors.Colormap, optional): Colour map for
+                the lines.
+        """
         fig, ax = plt.subplots()
         if clusters:
             if cmap is not None:
@@ -1835,6 +2457,16 @@ class FeatureSet:
         plt.show()
 
     def as_grid(self, clusters=False):
+        """Reconstruct a raster grid from the cluster or label assignments.
+
+        Args:
+            clusters (bool, optional): If ``True``, use K-means cluster
+                assignments; otherwise use aggregated labels.
+                Default ``False``.
+
+        Returns:
+            IntGrid: Grid of cluster/label values.
+        """
         res = IntGrid(
             self.meta["nodata"] * np.ones((self.meta["height"], self.meta["width"])),
             mask=self._mask,

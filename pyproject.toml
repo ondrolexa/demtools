@@ -33,6 +33,8 @@ dependencies = [
     "colorcet",
     "shapely",
     "tqdm",
+    "requests>=2.34.2",
+    "pytest>=9.0.3",
 ]
 
 [project.optional-dependencies]

@@ -63,8 +63,8 @@ class Grid:
             "driver": "GTiff",
             "dtype": np.dtype(self.__class__._dtype),
             "nodata": self.__class__._fill_value,
-            "width": 0,
-            "height": 0,
+            "width": None,
+            "height": None,
             "count": 1,
             "compress": "",
             "crs": riocrs.CRS.from_epsg(3857),
@@ -83,6 +83,9 @@ class Grid:
         # reshape if needed
         if len(data.shape) == 1:
             data = data.reshape((self.meta["height"], self.meta["width"]))
+        # set width an heigth if not set
+        if (self.meta["height"] is None) and (self.meta["width"] is None):
+            self.meta["height"], self.meta["width"] = data.shape
         # validate metadata
         assert data.shape == (
             self.meta["height"],
@@ -886,12 +889,13 @@ class Grid:
             list: Selected ``(x, y)`` coordinates.
         """
         n = kwargs.pop("n", 1)
+        show_clicks = kwargs.pop("show_clicks", 1)
         figsize = kwargs.get("figsize", self.figsize)
         fig, ax = plt.subplots(figsize=figsize)
         kwargs["ax"] = ax
         kwargs["show"] = False
         self.show(**kwargs)
-        return plt.ginput(n)
+        return plt.ginput(n, show_clicks=show_clicks)
 
     def show(self, **kwargs):
         """Display the grid using :func:`rasterio.plot.show`.
@@ -1863,28 +1867,36 @@ class DEMGrid(FloatGrid):
 
     @classmethod
     def from_serve5g(
-        cls, xmin, ymin, width=None, buffer=None, api_url="http://localhost:8088"
+        cls,
+        xmin,
+        ymin,
+        width=2048,
+        buffer=500,
+        centre=False,
+        api_url="http://localhost:8088",
     ):
         """Read a :class:`DEMGrid` from a serve5g REST API.
 
         Args:
-            xmin (float): x coordinate of lower left corner
-            ymin (float): y coordinate of lower left corner
-            width (float, optional): Size of clipped region in meters
-            buffer (float, optional): size of padding in meters
+            xmin (int): x coordinate of lower left corner
+            ymin (int): y coordinate of lower left corner
+            width (int, optional): Size of clipped region in meters
+            buffer (int, optional): size of padding in meters
+            centre (bool, optional): If True, xmin and ymin is centre of DEM. Default False
             api_url (str, optional): URL of REST API. Default is ``http://localhost:8088``
 
         Returns:
             DEMGrid: New DEM grid.
         """
-        if width is not None:
-            if buffer is not None:
-                url = f"{api_url}/{xmin}/{ymin}/{width}/{buffer}"
-            else:
-                url = f"{api_url}/{xmin}/{ymin}/{width}"
-        else:
-            url = f"{api_url}/{xmin}/{ymin}"
-        print("Getting data...")
+        if centre:
+            xmin -= width / 2
+            ymin -= width / 2
+        # round to 2.5 resolution grid
+        xmin = 2.5 * round(xmin / 2.5)
+        ymin = 2.5 * round(ymin / 2.5)
+        width = 2.5 * round(width / 2.5)
+        buffer = 2.5 * round(buffer / 2.5)
+        url = f"{api_url}/{xmin}/{ymin}/{width}/{buffer}"
         with requests.Session() as s:
             response = s.get(url, stream=True)
             with MemoryFile(response.raw) as memfile:
@@ -2066,6 +2078,54 @@ class DEMGrid(FloatGrid):
             tpi, mask=np.isnan(tpi) | self._mask, astype=FloatGrid, **kwargs
         )
 
+    def tpi_fft2(self, **kwargs):
+        """Calculate the Topographic Position Index using FFT convolution.
+
+        This version using two radiuses and calculate TPI bbetween inner
+        circle and donut circle.
+
+        Args:
+            win (numpy.ndarray, optional): Custom binary operation window.
+                Default ``None`` (creates a disk with radius *r*).
+            r1 (int, optional): Disk radius in pixels. Default ``5``.
+            r2 (int, optional): Disk radius in pixels. Default ``10``.
+            cmap (str, optional): Colormap. Default ``"seismic"``.
+            stretch (bool, optional): Stretch colormap. Default ``True``.
+            title (str, optional): Dataset title. Default ``"TPI(…)"``.
+
+        Returns:
+            FloatGrid: TPI grid.
+        """
+        r1 = kwargs.get("r1", 5)
+        r2 = kwargs.get("r2", 10)
+        assert r2 > r1, "r2 must be greater than r1"
+        L = np.arange(-r2, r2 + 1)
+        X, Y = np.meshgrid(L, L)
+        win_in = np.array((X**2 + Y**2) < r1**2, dtype=int)
+        win_out = np.array(
+            ((X**2 + Y**2) <= r2**2) & ((X**2 + Y**2) >= r1**2), dtype=int
+        )
+        # count grid
+        c_grid = np.ones(self.data.shape)
+        c_grid[self._mask] = 0
+        # do fast convolution
+        n_sum_in = signal.convolve(self.data.filled(0), win_in, mode="same")
+        n_count_in = signal.convolve(c_grid, win_in, mode="same")
+        n_sum_in = n_sum_in.astype(float)
+        n_sum_in[self._mask] = np.nan
+
+        n_sum_out = signal.convolve(self.data.filled(0), win_out, mode="same")
+        n_count_out = signal.convolve(c_grid, win_out, mode="same")
+        n_sum_out = n_sum_out.astype(float)
+        n_sum_out[self._mask] = np.nan
+        # this is TPI (spot height – average neighbourhood height)
+        tpi = n_sum_in / n_count_in - n_sum_out / n_count_out
+        kwargs["cmap"] = kwargs.get("cmap", "seismic")
+        kwargs["title"] = kwargs.get("title", f"TPI2({self.title})")
+        return self.clone(
+            tpi, mask=np.isnan(tpi) | self._mask, astype=FloatGrid, **kwargs
+        )
+
     def tpi_cube(self, **kwargs):
         """Compute TPI at multiple scales and return as a :class:`FeatureSet`.
 
@@ -2082,8 +2142,13 @@ class DEMGrid(FloatGrid):
         """
         n = kwargs.pop("n", 20)
         scale = kwargs.pop("scale", 3.322)
+        progress = kwargs.pop("progress", True)
         steps = np.arange(0, (n - 1) * 2**scale + 1, 2**scale, dtype=int)
-        for r in tqdm(steps, desc="Calculating TPI"):
+        if progress:
+            looper = tqdm(steps, desc="Calculating TPI")
+        else:
+            looper = steps
+        for r in looper:
             if r == 0:
                 cube = [np.zeros_like(self.filled, dtype=float)[~self._mask]]
             else:
@@ -2093,6 +2158,37 @@ class DEMGrid(FloatGrid):
                     win = np.array(1 / np.sqrt(X**2 + Y**2))
                     win[(X**2 + Y**2) > r**2] = 0
                 tpi = self.tpi_fft(win=win).filled
+                cube.append(tpi[~self._mask])
+        return FeatureSet(
+            np.array(cube).T, self._mask, self.meta, feature_coords=steps, **kwargs
+        )
+
+    def tpi_cube2(self, **kwargs):
+        """Compute TPI2 at multiple scales and return as a :class:`FeatureSet`.
+
+        The resulting feature set has one column per scale, allowing
+        multi-scale terrain analysis.
+
+        Args:
+            n (int, optional): Number of scales. Default ``20``.
+            step (int, optional): Window size step. Default ``10``.
+
+        Returns:
+            FeatureSet: Multi-scale TPI features.
+        """
+        n = kwargs.pop("n", 20)
+        step = kwargs.pop("step", 10)
+        progress = kwargs.pop("progress", True)
+        steps = np.arange(0, n * step, step, dtype=int)
+        if progress:
+            looper = tqdm(steps, desc="Calculating TPI")
+        else:
+            looper = steps
+        for r in looper:
+            if r == 0:
+                cube = [np.zeros_like(self.filled, dtype=float)[~self._mask]]
+            else:
+                tpi = self.tpi_fft2(r1=r - step // 2, r2=r + step // 2).filled
                 cube.append(tpi[~self._mask])
         return FeatureSet(
             np.array(cube).T, self._mask, self.meta, feature_coords=steps, **kwargs
@@ -2305,7 +2401,6 @@ class FeatureSet:
     def __init__(self, data, mask, meta, **kwargs):
         self.feature_coords = kwargs.get("feature_coords", np.arange(data.shape[1]))
         if kwargs.get("use_grad", False):
-            print("Calculating gradient... ")
             data = np.gradient(data, self.feature_coords, axis=1)
         self.data = data
         self._mask = mask
@@ -2333,7 +2428,6 @@ class FeatureSet:
         """
         model = kwargs.get("model", None)
         if model is None:
-            print("Calculating initial clusters... ")
             model = KMeans(
                 n_clusters=kwargs.get("n_kmeans", 256),
                 random_state=kwargs.get("random_state", 42),
@@ -2343,7 +2437,6 @@ class FeatureSet:
         self.clusters = model.predict(self.data)
         self.centers = model.cluster_centers_
         self.aggclusters(**kwargs)
-        print("Done.")
 
     def batch_cluster(self, **kwargs):
         """Run mini-batch K-means for large datasets.
@@ -2357,7 +2450,6 @@ class FeatureSet:
             bs (int, optional): Chunk size for partial fit.
                 Default ``1000000``.
         """
-        print("Calculating initial clusters... ")
         kmeans = MiniBatchKMeans(
             n_clusters=kwargs.get("n_kmeans", 256),
             random_state=kwargs.get("random_state", 42),
@@ -2372,7 +2464,6 @@ class FeatureSet:
         self.clusters = kmeans.predict(self.data)
         self.centers = kmeans.cluster_centers_
         self.aggclusters(**kwargs)
-        print("Done.")
 
     def dendrogram(self, **kwargs):
         """Display a dendrogram of the cluster centres.
@@ -2476,3 +2567,26 @@ class FeatureSet:
             return res.clone(self.clusters, only_valid=True)
         else:
             return res.clone(self.labels, only_valid=True)
+
+    def difference(self, dst, threshold=None):
+        """Return sum of squared diffences of features from dst.
+
+        Args:
+            dst (arraylike): Reference values
+
+        Returns:
+            FloatGrid: Grid of squared diffences.
+        """
+        assert (
+            len(dst) == self.data.shape[1]
+        ), f"Wrong length of dst vector. M<ust be {self.data.shape[1]}"
+        res = FloatGrid(
+            self.meta["nodata"] * np.ones((self.meta["height"], self.meta["width"])),
+            mask=self._mask,
+            **self.meta,
+        )
+        vals = np.sum((self.data - np.asarray(dst)) ** 2, axis=1)
+        if threshold is None:
+            return res.clone(vals, only_valid=True)
+        else:
+            return res.clone(vals, only_valid=True) < threshold

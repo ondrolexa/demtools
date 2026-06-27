@@ -21,10 +21,24 @@ class H5Store:
     """
 
     def __init__(self, file):
+        """Open an HDF5 file and bind the ``Band1`` dataset handle."""
         self.h5file = h5py.File(file, "r")
         self.data = self.h5file["Band1"]
 
     def __del__(self):
+        """Close the HDF5 file handle when the object is garbage-collected."""
+        self.h5file.close()
+
+    def __enter__(self):
+        """Return self to support use as a context manager.
+
+        Returns:
+            H5Store: This instance.
+        """
+        return self
+
+    def __exit__(self, *_):
+        """Close the HDF5 file handle on context-manager exit."""
         self.h5file.close()
 
     @property
@@ -70,6 +84,13 @@ class H5Store:
             "count": 1,
             "compress": "",
             "crs": riocrs.CRS.from_wkt(wkt),
-            "transform": Affine(gt[1], 0.0, gt[0], 0.0, gt[5], gt[3]),
+            "transform": Affine(
+                gt[1],
+                0.0,
+                gt[0] + c * gt[1],
+                0.0,
+                gt[5],
+                gt[3] + (ymax - r - h) * gt[5],
+            ),
         }
         return DEMGrid(res, **meta)

@@ -1,12 +1,9 @@
 [build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-"demtools.data" = ["*.tif"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/demtools"]
 
 [project]
 name = "demtools"
@@ -34,11 +31,10 @@ dependencies = [
     "shapely",
     "tqdm",
     "requests>=2.34.2",
-    "pytest>=9.0.3",
 ]
 
 [project.optional-dependencies]
-extra = ["jupyterlab"]
+lab = ["jupyterlab"]
 tests = ["pytest", "pytest-cov", "nbval"]
 docs = [
     "ipykernel",
@@ -48,11 +44,28 @@ docs = [
     "sphinx_mdinclude",
     "sphinx_rtd_theme",
 ]
-dev = ["demtools[extra,tests,docs]", "black", "flake8", "isort"]
+
+[dependency-groups]
+dev = [
+    "black",
+    "flake8",
+    "isort",
+    "pytest",
+    "pytest-cov",
+    "nbval",
+    "jupyterlab",
+    "ipykernel",
+    "nbsphinx",
+    "nbsphinx-link",
+    "sphinx",
+    "sphinx_mdinclude",
+    "sphinx_rtd_theme",
+]
 
 [tool.black]
 line-length = 88
 extend-exclude = '''.*ui_.*'''
+target-version = ["py312", "py313", "py314"]
 
 [tool.isort]
 profile = "black"

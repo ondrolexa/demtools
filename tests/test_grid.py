@@ -39,7 +39,7 @@ class TestConstruction:
     def test_meta_nodata_correct_per_subclass(self):
         import numpy as np
 
-        from demtools import BoolGrid, DEMGrid, FloatGrid, IntGrid
+        from demtools import BoolGrid, FloatGrid, IntGrid
 
         fg = FloatGrid(np.ma.array([[1.0]], dtype=float), height=1, width=1)
         assert np.isnan(fg.meta["nodata"])
@@ -331,7 +331,7 @@ class TestFilter:
         assert result.shape == fgrid.shape
 
     def test_correlation_odd_filter_assert(self, fgrid):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             fgrid.correlation(np.ones((2, 2)))
 
 
@@ -357,6 +357,6 @@ class TestAsDataset:
     def test_asdataset_context(self, fgrid):
         with fgrid.asdataset() as src:
             assert src.count == 1
-            data = src.read(1)
+            data = src.read([1])[0]
             assert data.shape == (3, 3)
             assert data[0, 0] == pytest.approx(1.0)

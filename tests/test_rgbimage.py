@@ -18,7 +18,7 @@ class TestRGBimage:
 
     def test_wrong_shape_raises(self):
         rgb = np.ones((2, 5, 5), dtype=float)
-        with np.testing.assert_raises(AssertionError):
+        with np.testing.assert_raises(ValueError):
             RGBimage(rgb, height=5, width=5)
 
     def test_write_tif(self, tmp_path):

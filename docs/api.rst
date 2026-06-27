@@ -1,42 +1,67 @@
-User API
-========
+API Reference
+=============
 
-.. toctree::
+demtools provides the following public classes.  All classes live in
+``demtools.grids`` (or ``demtools.storage`` for :class:`~demtools.storage.H5Store`)
+and are re-exported from the top-level ``demtools`` package.
 
-EPMAtools provides following classes:
+Each class documents only its **own** methods and attributes.  Because the full
+class hierarchy is documented here, inherited methods appear in the section for
+the class that defines them — use the **Show inheritance** banner to navigate
+between levels.
 
-DEMGrid
--------
+Grid (base class)
+-----------------
 
-.. autoclass:: demtools.grids.DEMGrid
+.. autoclass:: demtools.grids.Grid
     :members:
-    :inherited-members:
+    :show-inheritance:
 
-FloatGrid
----------
+BoolGrid
+--------
 
-.. autoclass:: demtools.grids.FloatGrid
+.. autoclass:: demtools.grids.BoolGrid
     :members:
-    :inherited-members:
+    :show-inheritance:
 
 IntGrid
 -------
 
 .. autoclass:: demtools.grids.IntGrid
     :members:
-    :inherited-members:
+    :show-inheritance:
 
-BoolGrid
+FloatGrid
+---------
+
+.. autoclass:: demtools.grids.FloatGrid
+    :members:
+    :show-inheritance:
+
+DEMGrid
 -------
 
-.. autoclass:: demtools.grids.BoolGrid
+.. autoclass:: demtools.grids.DEMGrid
     :members:
-    :inherited-members:
-
+    :show-inheritance:
 
 RGBimage
 --------
 
 .. autoclass:: demtools.grids.RGBimage
     :members:
-    :inherited-members:
+    :show-inheritance:
+
+FeatureSet
+----------
+
+.. autoclass:: demtools.grids.FeatureSet
+    :members:
+    :show-inheritance:
+
+H5Store
+-------
+
+.. autoclass:: demtools.storage.H5Store
+    :members:
+    :show-inheritance:
